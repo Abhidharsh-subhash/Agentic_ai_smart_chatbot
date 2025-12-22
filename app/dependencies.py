@@ -41,7 +41,7 @@ async def get_current_admin(request: Request, db: AsyncSession = Depends(get_db)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or Expired Token"
         )
-    result = await db.execute(select(Admins).where(Admins.id == int(admin_id)))
+    result = await db.execute(select(Admins).where(Admins.id == admin_id))
     admin = result.scalar_one_or_none()
 
     if admin is None:

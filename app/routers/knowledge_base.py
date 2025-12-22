@@ -4,7 +4,14 @@ from sqlalchemy import select
 from app.dependencies import get_current_admin, get_db
 from app.models.admins import Admins
 from app.models.knowledge_base import Folders, Files
-from app.schemas.folders import FolderCreate, FolderResponse, FolderRename
+from app.schemas.folders import (
+    FolderCreate,
+    FolderResponse,
+    FolderRename,
+    FolderDelete,
+    DeleteResponse,
+    FolderList,
+)
 from sqlalchemy.exc import IntegrityError
 
 
@@ -40,6 +47,7 @@ async def create_folder(
             detail="Folder Creation Failed! Try again.",
         )
     await db.refresh(folder)
+    print(folder)
     return {
         "status_code": status.HTTP_201_CREATED,
         "message": "Folder created successfully!",
@@ -48,7 +56,7 @@ async def create_folder(
 
 
 @router.put(
-    "rename_folder", status_code=status.HTTP_200_OK, response_model=FolderResponse
+    "/rename_folder", status_code=status.HTTP_200_OK, response_model=FolderResponse
 )
 async def rename_folder(
     payload: FolderRename,
@@ -94,15 +102,75 @@ async def rename_folder(
     }
 
 
-@router.delete("delete_folder", status_code=status.HTTP_200_OK)
+@router.delete(
+    "/delete_folder", status_code=status.HTTP_200_OK, response_model=DeleteResponse
+)
 async def delete_folder(
+    payload: FolderDelete,
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
-    pass
+    result = await db.execute(
+        select(Folders).where(
+            Folders.id == payload.folder_id,
+            Folders.deleted.is_(False),
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Folder does not exist!"
+        )
+    if folder.admin_id != current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="You are not authorized to delete the folder.",
+        )
+    folder.deleted = True
+    try:
+        await db.commit()
+    except IntegrityError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to delete the file. Try again!",
+        )
+    return {
+        "status_code": status.HTTP_204_NO_CONTENT,
+        "message": "Folder Deleted Successfully!",
+    }
 
 
-@router.post("/{folder_id}/upload_file", status_code=status.HTTP_201_CREATED)
+@router.get("/folder_list", status_code=status.HTTP_200_OK, response_model=FolderList)
+async def available_folders(
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admins = Depends(get_current_admin),
+):
+    result = await db.execute(select(Folders).where(Folders.deleted.isnot(True)))
+    folders = result.scalars().all()
+    if len(folders) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No Folder Found"
+        )
+    return {"status_code": status.HTTP_200_OK, "data": folders}
+
+
+@router.get(
+    "/deleted_folder_list", status_code=status.HTTP_200_OK, response_model=FolderList
+)
+async def deleted_folders(
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admins = Depends(get_current_admin),
+):
+    result = await db.execute(select(Folders).where(Folders.deleted.isnot(False)))
+    folders = result.scalars().all()
+    if len(folders) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No Folders Found."
+        )
+    return {"status_code": status.HTTP_200_OK, "data": folders}
+
+
+@router.post("{folder_id}/upload_file", status_code=status.HTTP_201_CREATED)
 async def file_upload(
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
