@@ -23,3 +23,19 @@ class delete_file_body(BaseModel):
 class delete_response(BaseModel):
     status: int
     message: str
+
+
+class get_files(BaseModel):
+    folder_id: UUID
+
+
+class file(BaseModel):
+    id: UUID
+    original_filename: str
+    unique_name: str
+
+
+class get_files_response(BaseModel):
+    status_code: int
+    message: str
+    data: List[file]

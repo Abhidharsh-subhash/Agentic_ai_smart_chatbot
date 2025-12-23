@@ -12,7 +12,13 @@ from app.schemas.folders import (
     DeleteResponse,
     FolderList,
 )
-from app.schemas.files import upload_file_response, delete_file_body, delete_response
+from app.schemas.files import (
+    upload_file_response,
+    delete_file_body,
+    delete_response,
+    get_files,
+    get_files_response,
+)
 from sqlalchemy.exc import IntegrityError
 from uuid import UUID
 from pathlib import Path
@@ -299,3 +305,32 @@ async def delete_file(
         message = "Files delete successfully"
     # return {"status_code": status.HTTP_204_NO_CONTENT, "message": message}
     return
+
+
+@router.get("/files", status_code=status.HTTP_200_OK, response_model=get_files_response)
+async def get_files(
+    payload: get_files,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admins = Depends(get_current_admin),
+):
+    result = await db.execute(
+        select(Folders).where(
+            Folders.id == payload.folder_id, Folders.deleted.is_(False)
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Folder not Found."
+        )
+    result = await db.execute(
+        select(Files).where(Files.folder_id == folder.id, Files.deleted.is_(False))
+    )
+    files = result.scalars().all()
+    if len(files) == 0:
+        raise HTTPException(status_code=status.HTTP_200_OK, detail="No files found")
+    return {
+        "status_code": status.HTTP_200_OK,
+        "message": "Files fetched successfully",
+        "data": files,
+    }
