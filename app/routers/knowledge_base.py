@@ -24,6 +24,7 @@ from uuid import UUID
 from pathlib import Path
 import uuid
 from sqlalchemy.orm import selectinload
+from typing import List
 
 
 router = APIRouter(prefix="/file_handling", tags=["KnowledgeBase"])
@@ -187,17 +188,23 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 @router.post(
-    "/upload_file",
+    "/upload_files",
     status_code=status.HTTP_201_CREATED,
     response_model=upload_file_response,
 )
-async def file_upload(
+async def upload_files(
     folder_id: UUID = Form(...),
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
-    # validate folder
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files provided",
+        )
+
+    # 1️⃣ Validate folder ownership
     result = await db.execute(
         select(Folders).where(
             Folders.id == folder_id,
@@ -208,41 +215,55 @@ async def file_upload(
     folder = result.scalar_one_or_none()
     if not folder:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Folder not found",
         )
 
-    # generate unique filename
-    ext = Path(file.filename).suffix
-    unique_name = f"{uuid.uuid4()}{ext}"
+    saved_files: list[Files] = []
 
-    # save file to disk
-    file_path = UPLOAD_DIR / unique_name
-    try:
-        with file_path.open("wb") as buffer:
-            buffer.write(await file.read())
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to save file"
+    # 2️⃣ Process each file
+    for upload in files:
+        ext = Path(upload.filename).suffix
+        unique_name = f"{uuid.uuid4()}{ext}"
+        file_path = UPLOAD_DIR / unique_name
+
+        try:
+            with file_path.open("wb") as buffer:
+                buffer.write(await upload.read())
+        except Exception:
+            # rollback disk writes if needed (optional)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to save file: {upload.filename}",
+            )
+
+        db_file = Files(
+            original_filename=upload.filename,
+            unique_name=unique_name,
+            folder_id=folder.id,
+            admin_id=current_admin.id,
         )
+        db.add(db_file)
+        saved_files.append(db_file)
 
-    # save data to database
-    db_file = Files(
-        original_filename=file.filename, unique_name=unique_name, folder_id=folder.id
-    )
-    db.add(db_file)
+    # 3️⃣ Commit once
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to upload the file, Try again!",
+            detail="Failed to upload one or more files",
         )
-    await db.refresh(db_file)
+
+    # 4️⃣ Refresh if needed
+    for file in saved_files:
+        await db.refresh(file)
+
     return {
         "status_code": status.HTTP_201_CREATED,
-        "message": "File Uploaded Successfully!",
-        "data": db_file,
+        "message": "Files uploaded successfully",
+        "data": saved_files,
     }
 
 
@@ -255,60 +276,42 @@ async def delete_file(
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
-    if not payload.file_ids:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Field id's cannot be emtpy"
-        )
+    file_ids = payload.file_ids
 
-    # get first file only
-    first_file_id = payload.file_ids[0]
+    # fetch only files owned by current admin
     result = await db.execute(
-        select(Files)
-        .options(selectinload(Files.folder))
-        .where(Files.id == first_file_id, Files.deleted.is_(False))
-    )
-    first_file = result.scalar_one_or_none()
-    if not first_file:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="File not Found"
+        select(Files).where(
+            Files.id.in_(file_ids),
+            Files.admin_id == current_admin.id,
+            Files.deleted.is_(False),
         )
-
-    # authorization check using folder
-    if first_file.folder.admin_id != current_admin.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to delete files from the folder.",
-        )
-
-    # db operations
-    result = await db.execute(
-        select(Files).where(Files.id.in_(payload.file_ids), Files.deleted.is_(False))
     )
     files = result.scalars().all()
+
+    # nothing to delete (but not an error)
     if not files:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No valid files found to delete",
+            status_code=status.HTTP_404_NOT_FOUND, detail="No file for you to delete"
         )
+
+    # soft delete owned files
     for file in files:
         file.deleted = True
+
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to delete the files"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to delete files",
         )
-    if len(payload.file_ids) == 1:
-        message = "File delete successfully"
-    else:
-        message = "Files delete successfully"
-    # return {"status_code": status.HTTP_204_NO_CONTENT, "message": message}
+
     return
 
 
 @router.get("/files", status_code=status.HTTP_200_OK, response_model=get_files_response)
-async def get_files(
+async def get_folder_files(
     payload: get_files,
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),

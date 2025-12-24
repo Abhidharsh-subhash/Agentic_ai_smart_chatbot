@@ -30,6 +30,9 @@ class Admins(Base):
     created_folders = relationship(
         "Folders", back_populates="admin", cascade="all,delete-orphan"
     )
+    created_files = relationship(
+        "Files", back_populates="admin", cascade="all,delete-orphan"
+    )
 
     def __repr__(self):
         return f"user with the mail {self.email}"

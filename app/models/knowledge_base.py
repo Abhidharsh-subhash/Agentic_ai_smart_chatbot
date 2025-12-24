@@ -54,6 +54,9 @@ class Files(Base):
     folder_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("folders.id", ondelete="CASCADE"), nullable=False
     )
+    admin_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("admins.id", ondelete="CASCADE"), nullable=True
+    )
     deleted: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), nullable=False
     )
@@ -67,3 +70,7 @@ class Files(Base):
         nullable=False,
     )
     folder = relationship("Folders", back_populates="inserted_files")
+    admin = relationship("Admins", back_populates="created_files")
+
+    def __repr__(self):
+        return f"folder {self.unique_name} created by {self.admin_id} of folder {self.folder_id}"

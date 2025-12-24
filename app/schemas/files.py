@@ -8,12 +8,13 @@ class upload_file_data(BaseModel):
     original_filename: str
     unique_name: str
     folder_id: UUID
+    admin_id: UUID
 
 
 class upload_file_response(BaseModel):
     status_code: int
     message: str
-    data: upload_file_data
+    data: List[upload_file_data]
 
 
 class delete_file_body(BaseModel):
