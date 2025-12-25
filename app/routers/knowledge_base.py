@@ -185,8 +185,8 @@ async def deleted_folders(
     return {"status_code": status.HTTP_200_OK, "data": folders}
 
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = Path(settings.upload_dir)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.post(
@@ -200,6 +200,11 @@ async def upload_files(
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
+    """
+    Upload files to a folder and trigger embedding generation.
+
+    Supported formats: PDF, DOCX, XLSX, XLS, CSV
+    """
     if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -221,14 +226,14 @@ async def upload_files(
             detail="Folder not found",
         )
 
-    uploaded_files: list[Files] = []
-    skipped_files: list[str] = []
+    uploaded_files: List[Files] = []
+    skipped_files: List[str] = []
 
     # 2️⃣ Process each file independently
     for upload in files:
         ext = Path(upload.filename).suffix.lower()
 
-        # ❌ Skip invalid extension
+        # Skip invalid extension
         if ext not in settings.allowed_extensions:
             skipped_files.append(upload.filename)
             continue
@@ -237,8 +242,9 @@ async def upload_files(
         file_path = UPLOAD_DIR / unique_name
 
         try:
+            content = await upload.read()
             with file_path.open("wb") as buffer:
-                buffer.write(await upload.read())
+                buffer.write(content)
         except Exception:
             skipped_files.append(upload.filename)
             continue
@@ -264,14 +270,35 @@ async def upload_files(
         await db.commit()
     except IntegrityError:
         await db.rollback()
+        # Clean up uploaded files on disk
+        for f in uploaded_files:
+            file_path = UPLOAD_DIR / f.unique_name
+            if file_path.exists():
+                file_path.unlink()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to upload files",
         )
 
-    # 5️⃣ Refresh
+    # 5️⃣ Refresh to get IDs
     for f in uploaded_files:
         await db.refresh(f)
+
+    # 6️⃣ Trigger Celery task for embedding generation
+    file_data = [
+        {
+            "file_id": str(f.id),
+            "unique_name": f.unique_name,
+            "original_filename": f.original_filename,
+            "extension": Path(f.original_filename).suffix.lower(),
+            "admin_id": str(current_admin.id),
+            "folder_id": str(folder_id),
+        }
+        for f in uploaded_files
+    ]
+
+    # Dispatch to Celery (async, non-blocking)
+    task = process_uploaded_files.delay(file_data)
 
     return {
         "status_code": status.HTTP_201_CREATED,
@@ -282,7 +309,32 @@ async def upload_files(
         ),
         "uploaded_files": uploaded_files,
         "skipped_files": skipped_files,
+        "task_id": task.id,  # Return task ID for status tracking
     }
+
+
+@router.get("/task/{task_id}")
+async def get_task_status(
+    task_id: str,
+    current_admin: Admins = Depends(get_current_admin),
+):
+    """Check the status of an embedding generation task."""
+    from app.core.celery_app import celery_app
+
+    result = celery_app.AsyncResult(task_id)
+
+    response = {
+        "task_id": task_id,
+        "status": result.status,
+    }
+
+    if result.ready():
+        if result.successful():
+            response["result"] = result.get()
+        else:
+            response["error"] = str(result.result)
+
+    return response
 
 
 @router.delete(

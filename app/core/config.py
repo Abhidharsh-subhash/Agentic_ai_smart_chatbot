@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import Set
+from pathlib import Path
 
 
 class Settings(BaseSettings):
@@ -32,6 +33,18 @@ class Settings(BaseSettings):
     smtp_port: int = Field(env="SMTP_PORT")
     sender_email: str = Field(env="SENDER_EMAIL")
     sender_password: str = Field(env="SENDER_PASSWORD")
+
+    # OpenAI
+    openai_api_key: str = Field(env="OPENAI_API_KEY")
+    embedding_model: str = Field(env="EMBEDDING_MODEL")
+
+    # File paths - stored as strings, converted to Path when needed
+    upload_dir: str = Field(env="UPLOAD_DIR")
+    vector_store_dir: str = Field(env="VECTOR_STORE_DIR")
+
+    # Embeddings config
+    chunk_size: int = Field(env="CHUNK_SIZE")
+    chunk_overlap: int = Field(env="CHUNK_OVERLAP")
 
     # Allowed Extension
     allowed_extensions: Set[str] = Field(

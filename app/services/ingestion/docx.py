@@ -1,21 +1,69 @@
 from langchain_community.document_loaders import Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pathlib import Path
+from langchain_core.documents import Document
+from datetime import datetime
+from typing import List, Dict, Any
+from app.core.config import settings
 
 
-def process_docx(file_path: str):
+def process_docx(
+    file_path: str,
+    file_metadata: Dict[str, Any],
+    chunk_size: int = None,
+    chunk_overlap: int = None,
+) -> List[Document]:
     """
-    Extracts text from a DOCX file and returns chunked Documents
+    Process DOCX file and return chunked Documents with metadata.
+
+    Args:
+        file_path: Path to DOCX file
+        file_metadata: Dict containing file_id, admin_id, folder_id, etc.
+        chunk_size: Size of text chunks (defaults to settings)
+        chunk_overlap: Overlap between chunks (defaults to settings)
+
+    Returns:
+        List of Document objects with enriched metadata
     """
-    path = Path(file_path)
+    chunk_size = chunk_size or settings.chunk_size
+    chunk_overlap = chunk_overlap or settings.chunk_overlap
 
-    loader = Docx2txtLoader(str(path))
-    documents = loader.load()
+    try:
+        loader = Docx2txtLoader(file_path)
+        documents = loader.load()
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        separators=["\n\n", "\n", " ", ""],
-    )
+        if not documents:
+            return []
 
-    return splitter.split_documents(documents)
+        # Enrich metadata
+        for doc in documents:
+            doc.metadata.update(
+                {
+                    "file_id": file_metadata.get("file_id"),
+                    "admin_id": file_metadata.get("admin_id"),
+                    "folder_id": file_metadata.get("folder_id"),
+                    "original_filename": file_metadata.get("original_filename"),
+                    "unique_name": file_metadata.get("unique_name"),
+                    "file_type": "docx",
+                    "indexed_at": datetime.utcnow().isoformat(),
+                }
+            )
+
+        # Split into chunks
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            length_function=len,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
+
+        chunks = splitter.split_documents(documents)
+
+        # Add chunk index to metadata
+        for idx, chunk in enumerate(chunks):
+            chunk.metadata["chunk_index"] = idx
+            chunk.metadata["total_chunks"] = len(chunks)
+
+        return chunks
+
+    except Exception as e:
+        raise RuntimeError(f"Error processing DOCX {file_path}: {str(e)}")

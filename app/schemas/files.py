@@ -1,24 +1,26 @@
 from pydantic import BaseModel, Field
 from uuid import UUID
-from typing import List
+from typing import List, Optional
+from datetime import datetime
 
 
-class UploadFileData(BaseModel):
+class FileResponse(BaseModel):
     id: UUID
     original_filename: str
     unique_name: str
     folder_id: UUID
-    admin_id: UUID
+    created_at: datetime
 
     class Config:
-        from_attributes = True  # VERY IMPORTANT for SQLAlchemy
+        from_attributes = True
 
 
 class upload_file_response(BaseModel):
     status_code: int
     message: str
-    uploaded_files: List[UploadFileData]
+    uploaded_files: List[FileResponse]
     skipped_files: List[str]
+    task_id: Optional[str] = None  # Celery task ID for tracking
 
 
 class delete_file_body(BaseModel):
