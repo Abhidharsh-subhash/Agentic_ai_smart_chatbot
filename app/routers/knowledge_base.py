@@ -25,6 +25,8 @@ from pathlib import Path
 import uuid
 from sqlalchemy.orm import selectinload
 from typing import List
+from app.core.config import settings
+from app.tasks.embedding_tasks import process_uploaded_files
 
 
 router = APIRouter(prefix="/file_handling", tags=["KnowledgeBase"])
@@ -219,11 +221,18 @@ async def upload_files(
             detail="Folder not found",
         )
 
-    saved_files: list[Files] = []
+    uploaded_files: list[Files] = []
+    skipped_files: list[str] = []
 
-    # 2️⃣ Process each file
+    # 2️⃣ Process each file independently
     for upload in files:
-        ext = Path(upload.filename).suffix
+        ext = Path(upload.filename).suffix.lower()
+
+        # ❌ Skip invalid extension
+        if ext not in settings.allowed_extensions:
+            skipped_files.append(upload.filename)
+            continue
+
         unique_name = f"{uuid.uuid4()}{ext}"
         file_path = UPLOAD_DIR / unique_name
 
@@ -231,11 +240,8 @@ async def upload_files(
             with file_path.open("wb") as buffer:
                 buffer.write(await upload.read())
         except Exception:
-            # rollback disk writes if needed (optional)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Failed to save file: {upload.filename}",
-            )
+            skipped_files.append(upload.filename)
+            continue
 
         db_file = Files(
             original_filename=upload.filename,
@@ -244,26 +250,38 @@ async def upload_files(
             admin_id=current_admin.id,
         )
         db.add(db_file)
-        saved_files.append(db_file)
+        uploaded_files.append(db_file)
 
-    # 3️⃣ Commit once
+    # 3️⃣ Nothing valid at all
+    if not uploaded_files:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="No supported files uploaded",
+        )
+
+    # 4️⃣ Commit DB
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to upload one or more files",
+            detail="Failed to upload files",
         )
 
-    # 4️⃣ Refresh if needed
-    for file in saved_files:
-        await db.refresh(file)
+    # 5️⃣ Refresh
+    for f in uploaded_files:
+        await db.refresh(f)
 
     return {
         "status_code": status.HTTP_201_CREATED,
-        "message": "Files uploaded successfully",
-        "data": saved_files,
+        "message": (
+            "Files uploaded partially"
+            if skipped_files
+            else "Files uploaded successfully"
+        ),
+        "uploaded_files": uploaded_files,
+        "skipped_files": skipped_files,
     }
 
 

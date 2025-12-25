@@ -3,18 +3,22 @@ from uuid import UUID
 from typing import List
 
 
-class upload_file_data(BaseModel):
+class UploadFileData(BaseModel):
     id: UUID
     original_filename: str
     unique_name: str
     folder_id: UUID
     admin_id: UUID
 
+    class Config:
+        from_attributes = True  # VERY IMPORTANT for SQLAlchemy
+
 
 class upload_file_response(BaseModel):
     status_code: int
     message: str
-    data: List[upload_file_data]
+    uploaded_files: List[UploadFileData]
+    skipped_files: List[str]
 
 
 class delete_file_body(BaseModel):

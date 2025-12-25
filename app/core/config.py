@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
+from typing import Set
 
 
 class Settings(BaseSettings):
@@ -32,10 +33,15 @@ class Settings(BaseSettings):
     sender_email: str = Field(env="SENDER_EMAIL")
     sender_password: str = Field(env="SENDER_PASSWORD")
 
+    # Allowed Extension
+    allowed_extensions: Set[str] = Field(
+        default_factory=set,
+        env="ALLOWED_EXTENSIONS",
+    )
+
     class Config:
         env_file = ".env"
         extra = "ignore"
 
 
 settings = Settings()
-print(settings.debug)
