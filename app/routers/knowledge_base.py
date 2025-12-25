@@ -338,7 +338,6 @@ async def delete_file(
 ):
     file_ids = payload.file_ids
 
-    # fetch only files owned by current admin
     result = await db.execute(
         select(Files).where(
             Files.id.in_(file_ids),
@@ -348,15 +347,19 @@ async def delete_file(
     )
     files = result.scalars().all()
 
-    # nothing to delete (but not an error)
     if not files:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No file for you to delete"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No file for you to delete",
         )
 
-    # soft delete owned files
+    deleted_file_ids: List[str] = []
+    deleted_unique_names: List[str] = []
+
     for file in files:
         file.deleted = True
+        deleted_file_ids.append(str(file.id))
+        deleted_unique_names.append(file.unique_name)
 
     try:
         await db.commit()
@@ -366,6 +369,13 @@ async def delete_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to delete files",
         )
+
+    # ✅ Use batch delete task (more efficient)
+    from app.tasks.embedding_tasks import delete_files_embeddings_task
+
+    delete_files_embeddings_task.delay(
+        file_ids=deleted_file_ids,
+    )
 
     return
 

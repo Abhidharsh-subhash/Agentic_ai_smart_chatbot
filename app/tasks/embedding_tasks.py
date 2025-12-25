@@ -9,6 +9,11 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = Path(settings.upload_dir)
 
 
+# =====================
+# FILE PROCESSING TASKS
+# =====================
+
+
 @celery_app.task(
     bind=True,
     autoretry_for=(Exception,),
@@ -18,22 +23,7 @@ UPLOAD_DIR = Path(settings.upload_dir)
     name="tasks.process_uploaded_files",
 )
 def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Process multiple uploaded files and create embeddings.
-
-    Args:
-        files: List of file metadata dicts containing:
-            - file_id: UUID of the file record
-            - unique_name: Unique filename on disk
-            - original_filename: Original uploaded filename
-            - extension: File extension (e.g., '.pdf')
-            - admin_id: Admin who uploaded the file
-            - folder_id: Folder containing the file
-
-    Returns:
-        Dict with processing results
-    """
-    # Import inside to avoid circular imports
+    """Process multiple uploaded files and create embeddings."""
     from app.services.ingestion.dispatcher import ingest_file
     from app.services.embeddings import store_embeddings
 
@@ -47,7 +37,6 @@ def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
         file_path = UPLOAD_DIR / file_info["unique_name"]
 
         try:
-            # Validate file exists
             if not file_path.exists():
                 logger.warning(f"File not found: {file_path}")
                 results["failed"].append(
@@ -61,13 +50,9 @@ def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
 
             logger.info(f"Processing: {file_info['original_filename']}")
 
-            # Ingest file (extract text and create Documents)
             documents = ingest_file(str(file_path), file_info)
 
             if not documents:
-                logger.warning(
-                    f"No content extracted from: {file_info['original_filename']}"
-                )
                 results["failed"].append(
                     {
                         "file_id": file_info["file_id"],
@@ -77,12 +62,10 @@ def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
                 )
                 continue
 
-            # ✅ Store embeddings (no admin_id needed - shared index)
             doc_count = store_embeddings(documents)
 
             logger.info(
-                f"✅ Processed {file_info['original_filename']}: "
-                f"{doc_count} documents embedded"
+                f"✅ Processed {file_info['original_filename']}: {doc_count} documents"
             )
 
             results["processed"].append(
@@ -109,52 +92,57 @@ def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
     return results
 
 
+# =====================
+# FILE DELETION TASKS
+# =====================
+
+
 @celery_app.task(
     bind=True,
     autoretry_for=(Exception,),
     retry_backoff=5,
-    retry_kwargs={"max_retries": 2},
-    name="tasks.process_single_file",
+    retry_kwargs={"max_retries": 3},
+    acks_late=True,
+    name="tasks.delete_files_embeddings",
 )
-def process_single_file(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Process a single uploaded file and create embeddings."""
-    from app.services.ingestion.dispatcher import ingest_file
-    from app.services.embeddings import store_embeddings
+def delete_files_embeddings_task(
+    self,
+    file_ids: List[str],
+) -> Dict[str, Any]:
+    """
+    Delete embeddings for multiple files from vector DB.
 
-    file_path = UPLOAD_DIR / file_info["unique_name"]
+    Args:
+        file_ids: List of file IDs to delete embeddings for
 
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
+    Returns:
+        Dict with deletion results
+    """
+    from app.services.embeddings import delete_multiple_files_embeddings
 
-    # Ingest and embed
-    documents = ingest_file(str(file_path), file_info)
-
-    if not documents:
-        raise ValueError(f"No content extracted from: {file_info['original_filename']}")
-
-    # ✅ Store embeddings (shared index)
-    doc_count = store_embeddings(documents)
-
-    return {
-        "file_id": file_info["file_id"],
-        "filename": file_info["original_filename"],
-        "documents_created": doc_count,
-        "status": "success",
+    result = {
+        "success": False,
+        "deleted_count": 0,
+        "file_ids_found": [],
+        "file_ids_not_found": [],
+        "error": None,
     }
 
+    try:
+        deletion_result = delete_multiple_files_embeddings(file_ids)
 
-@celery_app.task(bind=True, name="tasks.delete_file_embeddings")
-def delete_file_embeddings(self, file_id: str) -> Dict[str, Any]:
-    """
-    Delete embeddings for a specific file.
-    Called when a file is deleted from the system.
-    """
-    from app.services.embeddings import delete_file_embeddings
+        result["success"] = True
+        result["deleted_count"] = deletion_result.get("deleted_count", 0)
+        result["file_ids_found"] = deletion_result.get("file_ids_found", [])
+        result["file_ids_not_found"] = deletion_result.get("file_ids_not_found", [])
 
-    # ✅ No admin_id needed - delete by file_id only
-    success = delete_file_embeddings(file_id)
+        logger.info(
+            f"✅ Deleted {result['deleted_count']} embeddings "
+            f"for {len(result['file_ids_found'])} file(s)"
+        )
 
-    return {
-        "file_id": file_id,
-        "deleted": success,
-    }
+    except Exception as e:
+        logger.error(f"❌ Error deleting embeddings: {str(e)}")
+        result["error"] = str(e)
+
+    return result
