@@ -1,3 +1,4 @@
+# app/services/ingestion/pdf.py
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
@@ -14,15 +15,6 @@ def process_pdf(
 ) -> List[Document]:
     """
     Process PDF file and return chunked Documents with metadata.
-
-    Args:
-        file_path: Path to PDF file
-        file_metadata: Dict containing file_id, admin_id, folder_id, etc.
-        chunk_size: Size of text chunks (defaults to settings)
-        chunk_overlap: Overlap between chunks (defaults to settings)
-
-    Returns:
-        List of Document objects with enriched metadata
     """
     chunk_size = chunk_size or settings.chunk_size
     chunk_overlap = chunk_overlap or settings.chunk_overlap
@@ -39,7 +31,7 @@ def process_pdf(
             doc.metadata.update(
                 {
                     "file_id": file_metadata.get("file_id"),
-                    "admin_id": file_metadata.get("admin_id"),
+                    "admin_id": file_metadata.get("admin_id"),  # Keep for filtering
                     "folder_id": file_metadata.get("folder_id"),
                     "original_filename": file_metadata.get("original_filename"),
                     "unique_name": file_metadata.get("unique_name"),

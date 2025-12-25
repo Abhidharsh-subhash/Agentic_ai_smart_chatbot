@@ -14,15 +14,6 @@ def process_docx(
 ) -> List[Document]:
     """
     Process DOCX file and return chunked Documents with metadata.
-
-    Args:
-        file_path: Path to DOCX file
-        file_metadata: Dict containing file_id, admin_id, folder_id, etc.
-        chunk_size: Size of text chunks (defaults to settings)
-        chunk_overlap: Overlap between chunks (defaults to settings)
-
-    Returns:
-        List of Document objects with enriched metadata
     """
     chunk_size = chunk_size or settings.chunk_size
     chunk_overlap = chunk_overlap or settings.chunk_overlap

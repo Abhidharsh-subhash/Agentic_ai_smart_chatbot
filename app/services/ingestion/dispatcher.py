@@ -23,7 +23,7 @@ def ingest_file(file_path: str, file_metadata: Dict[str, Any]) -> List[Document]
 
     Args:
         file_path: Path to the file
-        file_metadata: Dict containing file info (file_id, admin_id, etc.)
+        file_metadata: Dict containing file info (file_id, admin_id, folder_id, etc.)
 
     Returns:
         List of Document objects ready for embedding

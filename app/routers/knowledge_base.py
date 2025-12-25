@@ -200,18 +200,15 @@ async def upload_files(
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
-    """
-    Upload files to a folder and trigger embedding generation.
-
-    Supported formats: PDF, DOCX, XLSX, XLS, CSV
-    """
+    """Upload files and trigger embedding generation."""
+    print(f"files is {files}")
     if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No files provided",
         )
 
-    # 1️⃣ Validate folder ownership
+    # Validate folder ownership
     result = await db.execute(
         select(Folders).where(
             Folders.id == folder_id,
@@ -229,11 +226,9 @@ async def upload_files(
     uploaded_files: List[Files] = []
     skipped_files: List[str] = []
 
-    # 2️⃣ Process each file independently
     for upload in files:
         ext = Path(upload.filename).suffix.lower()
 
-        # Skip invalid extension
         if ext not in settings.allowed_extensions:
             skipped_files.append(upload.filename)
             continue
@@ -258,33 +253,29 @@ async def upload_files(
         db.add(db_file)
         uploaded_files.append(db_file)
 
-    # 3️⃣ Nothing valid at all
     if not uploaded_files:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="No supported files uploaded",
         )
 
-    # 4️⃣ Commit DB
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        # Clean up uploaded files on disk
         for f in uploaded_files:
-            file_path = UPLOAD_DIR / f.unique_name
-            if file_path.exists():
-                file_path.unlink()
+            fp = UPLOAD_DIR / f.unique_name
+            if fp.exists():
+                fp.unlink()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to upload files",
         )
 
-    # 5️⃣ Refresh to get IDs
     for f in uploaded_files:
         await db.refresh(f)
 
-    # 6️⃣ Trigger Celery task for embedding generation
+    # Trigger Celery task
     file_data = [
         {
             "file_id": str(f.id),
@@ -297,7 +288,6 @@ async def upload_files(
         for f in uploaded_files
     ]
 
-    # Dispatch to Celery (async, non-blocking)
     task = process_uploaded_files.delay(file_data)
 
     return {
@@ -309,7 +299,7 @@ async def upload_files(
         ),
         "uploaded_files": uploaded_files,
         "skipped_files": skipped_files,
-        "task_id": task.id,  # Return task ID for status tracking
+        "task_id": task.id,
     }
 
 

@@ -14,19 +14,6 @@ def process_excel(
 ) -> List[Document]:
     """
     Process Excel file - each row becomes a separate document (NO chunking).
-
-    This ensures each Excel record is treated as an atomic unit for better
-    retrieval accuracy.
-
-    Args:
-        file_path: Path to Excel file
-        file_metadata: Dict containing file_id, admin_id, folder_id, etc.
-        sheet_name: Specific sheet(s) to process (None = all sheets)
-        text_columns: Specific columns to include (None = all columns)
-        row_format: 'structured' (key: value) or 'natural' (sentence-like)
-
-    Returns:
-        List of Document objects (one per row)
     """
     try:
         path = Path(file_path)
@@ -54,7 +41,6 @@ def process_excel(
             for idx, row in df.iterrows():
                 # Convert row to text based on format
                 if row_format == "structured":
-                    # Format: "Column1: Value1 | Column2: Value2 | ..."
                     text_parts = [
                         f"{col}: {val}"
                         for col, val in row.items()
@@ -62,7 +48,6 @@ def process_excel(
                     ]
                     text_content = " | ".join(text_parts)
                 else:
-                    # Natural format: "The Column1 is Value1, Column2 is Value2..."
                     text_parts = [
                         f"{col} is {val}"
                         for col, val in row.items()
@@ -74,27 +59,23 @@ def process_excel(
                 if not text_content.strip():
                     continue
 
-                # Build column metadata (store original values for filtering)
+                # Build column metadata
                 column_metadata = {
                     f"col_{col}": str(val) for col, val in row.items() if pd.notna(val)
                 }
 
-                # Create document with rich metadata
                 doc = Document(
                     page_content=text_content,
                     metadata={
-                        # File identification
                         "file_id": file_metadata.get("file_id"),
                         "admin_id": file_metadata.get("admin_id"),
                         "folder_id": file_metadata.get("folder_id"),
                         "original_filename": file_metadata.get("original_filename"),
                         "unique_name": file_metadata.get("unique_name"),
-                        # Excel-specific metadata
                         "file_type": "excel",
                         "sheet_name": str(sheet),
                         "row_index": int(idx),
                         "indexed_at": datetime.utcnow().isoformat(),
-                        # Column values as metadata
                         **column_metadata,
                     },
                 )

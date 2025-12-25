@@ -3,3 +3,4 @@ __pycache__
 .env
 versions
 uploads
+vector_store

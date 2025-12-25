@@ -1,22 +1,21 @@
-from celery import shared_task
 from typing import List, Dict, Any
 import logging
 from pathlib import Path
+from app.core.celery_app import celery_app
 from app.core.config import settings
-from app.services.ingestion.dispatcher import ingest_file
-from app.services.embeddings import store_embeddings
 
 logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(settings.upload_dir)
 
 
-@shared_task(
+@celery_app.task(
     bind=True,
     autoretry_for=(Exception,),
     retry_backoff=10,
     retry_kwargs={"max_retries": 3},
     acks_late=True,
+    name="tasks.process_uploaded_files",
 )
 def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -34,6 +33,10 @@ def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
     Returns:
         Dict with processing results
     """
+    # Import inside to avoid circular imports
+    from app.services.ingestion.dispatcher import ingest_file
+    from app.services.embeddings import store_embeddings
+
     results = {
         "processed": [],
         "failed": [],
@@ -74,8 +77,8 @@ def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
                 )
                 continue
 
-            # Store embeddings
-            doc_count = store_embeddings(documents, file_info["admin_id"])
+            # ✅ Store embeddings (no admin_id needed - shared index)
+            doc_count = store_embeddings(documents)
 
             logger.info(
                 f"✅ Processed {file_info['original_filename']}: "
@@ -106,17 +109,18 @@ def process_uploaded_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
     return results
 
 
-@shared_task(
+@celery_app.task(
     bind=True,
     autoretry_for=(Exception,),
     retry_backoff=5,
     retry_kwargs={"max_retries": 2},
+    name="tasks.process_single_file",
 )
 def process_single_file(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Process a single uploaded file and create embeddings.
-    Useful for immediate processing without batching.
-    """
+    """Process a single uploaded file and create embeddings."""
+    from app.services.ingestion.dispatcher import ingest_file
+    from app.services.embeddings import store_embeddings
+
     file_path = UPLOAD_DIR / file_info["unique_name"]
 
     if not file_path.exists():
@@ -128,7 +132,8 @@ def process_single_file(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
     if not documents:
         raise ValueError(f"No content extracted from: {file_info['original_filename']}")
 
-    doc_count = store_embeddings(documents, file_info["admin_id"])
+    # ✅ Store embeddings (shared index)
+    doc_count = store_embeddings(documents)
 
     return {
         "file_id": file_info["file_id"],
@@ -138,15 +143,16 @@ def process_single_file(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-@shared_task(bind=True)
-def delete_file_embeddings(self, file_id: str, admin_id: str) -> Dict[str, Any]:
+@celery_app.task(bind=True, name="tasks.delete_file_embeddings")
+def delete_file_embeddings(self, file_id: str) -> Dict[str, Any]:
     """
     Delete embeddings for a specific file.
     Called when a file is deleted from the system.
     """
-    from app.services.embeddings import embedding_service
+    from app.services.embeddings import delete_file_embeddings
 
-    success = embedding_service.delete_by_file_id(file_id, admin_id)
+    # ✅ No admin_id needed - delete by file_id only
+    success = delete_file_embeddings(file_id)
 
     return {
         "file_id": file_id,

@@ -12,15 +12,6 @@ def process_csv(
 ) -> List[Document]:
     """
     Process CSV file - each row becomes a separate document (NO chunking).
-
-    Args:
-        file_path: Path to CSV file
-        file_metadata: Dict containing file_id, admin_id, folder_id, etc.
-        text_columns: Specific columns to include (None = all columns)
-        row_format: 'structured' (key: value) or 'natural' (sentence-like)
-
-    Returns:
-        List of Document objects (one per row)
     """
     try:
         df = pd.read_csv(file_path)
@@ -34,7 +25,6 @@ def process_csv(
         documents = []
 
         for idx, row in df.iterrows():
-            # Convert row to text based on format
             if row_format == "structured":
                 text_parts = [
                     f"{col}: {val}"
@@ -50,11 +40,9 @@ def process_csv(
                 ]
                 text_content = ", ".join(text_parts)
 
-            # Skip empty rows
             if not text_content.strip():
                 continue
 
-            # Build column metadata
             column_metadata = {
                 f"col_{col}": str(val) for col, val in row.items() if pd.notna(val)
             }

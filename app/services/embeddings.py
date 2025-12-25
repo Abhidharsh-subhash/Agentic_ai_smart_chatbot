@@ -1,4 +1,3 @@
-# app/services/embeddings.py
 from pathlib import Path
 from typing import List, Optional
 from langchain_openai import OpenAIEmbeddings
@@ -6,41 +5,36 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 import threading
 from app.core.config import settings
+from pathlib import Path
 
 # Thread lock for FAISS operations (FAISS is not thread-safe)
 _faiss_lock = threading.Lock()
 
 
 class EmbeddingService:
-    """Service for managing document embeddings with FAISS."""
+    """Service for managing document embeddings with shared FAISS index."""
 
     def __init__(self):
-        self.index_dir = Path(settings.vector_store_dir)
+        self.index_dir = Path(settings.vector_store_dir)  # Single shared directory
         self.embeddings = OpenAIEmbeddings(
             model=settings.embedding_model,
             openai_api_key=settings.openai_api_key,
         )
+        # Ensure directory exists
+        self.index_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_index_path(self, admin_id: str) -> Path:
-        """Get admin-specific index path."""
-        # Option 1: Shared index for all admins
-        # return self.index_dir
+    @property
+    def index_file(self) -> Path:
+        """Get the index file path."""
+        return self.index_dir / "index.faiss"
 
-        # Option 2: Separate index per admin (recommended for multi-tenancy)
-        return self.index_dir / admin_id
-
-    def store_documents(
-        self,
-        documents: List[Document],
-        admin_id: str,
-    ) -> int:
+    def store_documents(self, documents: List[Document]) -> int:
         """
-        Store document embeddings in FAISS.
+        Store document embeddings in shared FAISS index.
         Creates new index if none exists, otherwise adds to existing.
 
         Args:
             documents: List of Document objects to embed
-            admin_id: Admin ID for index isolation
 
         Returns:
             Number of documents stored
@@ -48,16 +42,11 @@ class EmbeddingService:
         if not documents:
             return 0
 
-        index_path = self._get_index_path(admin_id)
-        index_path.mkdir(parents=True, exist_ok=True)
-
-        index_file = index_path / "index.faiss"
-
         with _faiss_lock:
-            if index_file.exists():
+            if self.index_file.exists():
                 # Load existing and add new documents
                 vector_store = FAISS.load_local(
-                    str(index_path),
+                    str(self.index_dir),
                     self.embeddings,
                     allow_dangerous_deserialization=True,
                 )
@@ -67,14 +56,13 @@ class EmbeddingService:
                 vector_store = FAISS.from_documents(documents, self.embeddings)
 
             # Persist
-            vector_store.save_local(str(index_path))
+            vector_store.save_local(str(self.index_dir))
 
         return len(documents)
 
     def search(
         self,
         query: str,
-        admin_id: str,
         k: int = 5,
         filter_dict: Optional[dict] = None,
     ) -> List[Document]:
@@ -83,22 +71,18 @@ class EmbeddingService:
 
         Args:
             query: Search query
-            admin_id: Admin ID for index isolation
             k: Number of results
-            filter_dict: Optional metadata filters
+            filter_dict: Optional metadata filters (e.g., {"admin_id": "xxx"})
 
         Returns:
             List of matching Documents
         """
-        index_path = self._get_index_path(admin_id)
-        index_file = index_path / "index.faiss"
-
-        if not index_file.exists():
+        if not self.index_file.exists():
             return []
 
         with _faiss_lock:
             vector_store = FAISS.load_local(
-                str(index_path),
+                str(self.index_dir),
                 self.embeddings,
                 allow_dangerous_deserialization=True,
             )
@@ -114,28 +98,52 @@ class EmbeddingService:
 
         return results
 
-    def delete_by_file_id(self, file_id: str, admin_id: str) -> bool:
+    def search_with_scores(
+        self,
+        query: str,
+        k: int = 5,
+    ) -> List[tuple[Document, float]]:
+        """
+        Search for similar documents with relevance scores.
+
+        Args:
+            query: Search query
+            k: Number of results
+
+        Returns:
+            List of (Document, score) tuples
+        """
+        if not self.index_file.exists():
+            return []
+
+        with _faiss_lock:
+            vector_store = FAISS.load_local(
+                str(self.index_dir),
+                self.embeddings,
+                allow_dangerous_deserialization=True,
+            )
+            results = vector_store.similarity_search_with_score(query, k=k)
+
+        return results
+
+    def delete_by_file_id(self, file_id: str) -> bool:
         """
         Delete all embeddings for a specific file.
 
         Note: FAISS doesn't support deletion directly.
         This requires rebuilding the index without the deleted documents.
         """
-        index_path = self._get_index_path(admin_id)
-        index_file = index_path / "index.faiss"
-
-        if not index_file.exists():
+        if not self.index_file.exists():
             return False
 
         with _faiss_lock:
             vector_store = FAISS.load_local(
-                str(index_path),
+                str(self.index_dir),
                 self.embeddings,
                 allow_dangerous_deserialization=True,
             )
 
-            # Get all documents
-            # Note: This is a workaround since FAISS doesn't support deletion
+            # Get all documents (workaround for FAISS)
             all_docs = vector_store.similarity_search("", k=100000)
 
             # Filter out documents with matching file_id
@@ -149,30 +157,77 @@ class EmbeddingService:
             if remaining_docs:
                 # Rebuild index without deleted documents
                 new_store = FAISS.from_documents(remaining_docs, self.embeddings)
-                new_store.save_local(str(index_path))
+                new_store.save_local(str(self.index_dir))
             else:
                 # No documents left, remove index files
                 import shutil
 
-                shutil.rmtree(index_path)
+                shutil.rmtree(self.index_dir)
+                self.index_dir.mkdir(parents=True, exist_ok=True)
 
         return True
+
+    def get_index_stats(self) -> dict:
+        """Get statistics about the index."""
+        if not self.index_file.exists():
+            return {"exists": False, "total_documents": 0}
+
+        with _faiss_lock:
+            vector_store = FAISS.load_local(
+                str(self.index_dir),
+                self.embeddings,
+                allow_dangerous_deserialization=True,
+            )
+
+            # Get sample to count
+            all_docs = vector_store.similarity_search("", k=100000)
+
+            # Collect unique files
+            files = set()
+            admins = set()
+            for doc in all_docs:
+                files.add(doc.metadata.get("file_id", "unknown"))
+                admins.add(doc.metadata.get("admin_id", "unknown"))
+
+        return {
+            "exists": True,
+            "total_documents": len(all_docs),
+            "unique_files": len(files),
+            "unique_admins": len(admins),
+        }
 
 
 # Singleton instance
 embedding_service = EmbeddingService()
 
 
-def store_embeddings(documents: List[Document], admin_id: str) -> int:
-    """Convenience function to store embeddings."""
-    return embedding_service.store_documents(documents, admin_id)
+# =====================
+# Convenience Functions
+# =====================
+
+
+def store_embeddings(documents: List[Document]) -> int:
+    """Store embeddings in shared index."""
+    return embedding_service.store_documents(documents)
 
 
 def search_embeddings(
     query: str,
-    admin_id: str,
     k: int = 5,
     filter_dict: Optional[dict] = None,
 ) -> List[Document]:
-    """Convenience function to search embeddings."""
-    return embedding_service.search(query, admin_id, k, filter_dict)
+    """Search embeddings in shared index."""
+    return embedding_service.search(query, k, filter_dict)
+
+
+def search_embeddings_with_scores(
+    query: str,
+    k: int = 5,
+) -> List[tuple[Document, float]]:
+    """Search embeddings with relevance scores."""
+    return embedding_service.search_with_scores(query, k)
+
+
+def delete_file_embeddings(file_id: str) -> bool:
+    """Delete embeddings for a specific file."""
+    return embedding_service.delete_by_file_id(file_id)
