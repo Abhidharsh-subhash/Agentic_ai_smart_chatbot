@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = Field(env="OPENAI_API_KEY")
     embedding_model: str = Field(env="EMBEDDING_MODEL")
+    openai_model: str = Field(env="OPENAI_MODEL")
 
     # File paths - stored as strings, converted to Path when needed
     upload_dir: str = Field(env="UPLOAD_DIR")
