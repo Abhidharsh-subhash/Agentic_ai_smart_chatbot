@@ -1,6 +1,17 @@
 import operator
-from typing import TypedDict, Annotated, Sequence, List
+from typing import TypedDict, Annotated, Sequence, List, Optional
 from langchain_core.messages import BaseMessage
+
+
+class ThinkingOutput(TypedDict):
+    """Structure for Chain of Thought output."""
+
+    understanding: str
+    key_topics: List[str]
+    search_queries: List[str]
+    reasoning: str
+    is_follow_up: bool
+    referenced_context: Optional[str]
 
 
 class AgentState(TypedDict):
@@ -38,3 +49,14 @@ class AgentState(TypedDict):
     # Response control
     should_respond_not_found: bool
     not_found_message: str
+
+    # ============ NEW: Chain of Thought ============
+    thinking: Optional[ThinkingOutput]
+    planned_search_queries: List[str]
+
+    # ============ NEW: Conversation Memory ============
+    conversation_summary: str
+    last_assistant_response: str
+    last_user_query: str
+    is_follow_up_question: bool
+    follow_up_context: str

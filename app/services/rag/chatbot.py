@@ -7,15 +7,17 @@ from .graph import create_rag_graph
 from .state import AgentState
 from .config import InteractionMode
 from .analyzers import ResponseSanitizer
+from .memory import memory_manager
 
 
 class ChatbotService:
-    """Chatbot service for handling RAG-based conversations."""
+    """Chatbot service with CoT and Memory."""
 
     def __init__(self, session_id: Optional[str] = None):
         self.agent = create_rag_graph()
         self.session_id = session_id or f"session_{datetime.now().timestamp()}"
         self.context = {
+            "session_id": self.session_id,  # Important for memory
             "last_topic": None,
             "topics_discussed": [],
             "questions_asked": 0,
@@ -30,11 +32,13 @@ class ChatbotService:
     def _extract_topics(self, message: str) -> List[str]:
         """Extract topics from message."""
         topic_keywords = {
-            "authentication": ["login", "password", "auth", "sign in"],
-            "user_management": ["user", "account", "profile", "permission"],
-            "configuration": ["setting", "config", "setup"],
-            "billing": ["invoice", "payment", "billing"],
-            "booking": ["booking", "reservation", "travel"],
+            "authentication": ["login", "password", "auth", "sign in", "logout"],
+            "user_management": ["user", "account", "profile", "permission", "role"],
+            "configuration": ["setting", "config", "setup", "configure"],
+            "billing": ["invoice", "payment", "billing", "charge", "price"],
+            "booking": ["booking", "reservation", "travel", "trip"],
+            "visa": ["visa", "application", "passport", "travel document"],
+            "admin": ["admin", "administrator", "management", "dashboard"],
         }
 
         message_lower = message.lower()
@@ -79,11 +83,19 @@ class ChatbotService:
             "best_match_score": float("inf"),
             "should_respond_not_found": False,
             "not_found_message": "",
+            # New CoT fields
+            "thinking": None,
+            "planned_search_queries": [],
+            # New Memory fields
+            "conversation_summary": "",
+            "last_assistant_response": "",
+            "last_user_query": "",
+            "is_follow_up_question": False,
+            "follow_up_context": "",
         }
 
     def _process_result(self, result: dict, message: str) -> str:
         """Process agent result and extract response."""
-        # Update state
         self.pending_clarification = result.get("pending_clarification", False)
         if self.pending_clarification:
             self.original_query = result.get("original_query", message)
@@ -92,12 +104,10 @@ class ChatbotService:
             self.original_query = None
             self.clarification_attempts = 0
 
-        # Extract response
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and msg.content:
                 response = msg.content
 
-                # Only sanitize if not a pre-written not-found response
                 is_not_found = result.get("should_respond_not_found", False)
 
                 if not is_not_found:
@@ -109,7 +119,6 @@ class ChatbotService:
                     else:
                         response = ResponseSanitizer.sanitize(response)
 
-                # Track conversation
                 self.conversation_history.append({"role": "user", "content": message})
                 self.conversation_history.append(
                     {"role": "assistant", "content": response}
@@ -129,16 +138,22 @@ class ChatbotService:
             return self._process_result(result, message)
         except Exception as e:
             print(f"Error in chat: {e}")
+            import traceback
+
+            traceback.print_exc()
             return "I encountered an issue processing your request. Please try again."
 
     async def chat(self, message: str) -> str:
         """Async chat method for WebSocket."""
-        # Run sync agent in thread pool to not block event loop
         return await asyncio.to_thread(self.chat_sync, message)
 
     def reset(self):
         """Reset conversation state."""
+        # Clear memory for this session
+        memory_manager.remove(self.session_id)
+
         self.context = {
+            "session_id": self.session_id,
             "last_topic": None,
             "topics_discussed": [],
             "questions_asked": 0,
@@ -150,8 +165,17 @@ class ChatbotService:
         self.original_query = None
         self.clarification_attempts = 0
 
+    def get_conversation_summary(self) -> dict:
+        """Get summary of current conversation."""
+        memory = memory_manager.get_or_create(self.session_id)
+        return {
+            "session_id": self.session_id,
+            "turns": len(memory.turns),
+            "topics_discussed": memory.key_topics,
+            "questions_asked": self.context.get("questions_asked", 0),
+        }
 
-# Session manager for WebSocket connections
+
 class SessionManager:
     """Manages chatbot sessions for WebSocket connections."""
 
@@ -167,14 +191,16 @@ class SessionManager:
     def remove(self, session_id: str):
         """Remove a session."""
         if session_id in self._sessions:
+            # Also remove memory
+            memory_manager.remove(session_id)
             del self._sessions[session_id]
 
     def clear_all(self):
         """Clear all sessions."""
+        memory_manager.clear_all()
         self._sessions.clear()
 
 
-# Global session manager instance
 session_manager = SessionManager()
 
 

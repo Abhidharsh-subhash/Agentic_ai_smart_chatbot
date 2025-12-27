@@ -6,3 +6,4 @@ uploads
 vector_store
 test_websocket.py
 data.py
+test_websocket_memory.py
