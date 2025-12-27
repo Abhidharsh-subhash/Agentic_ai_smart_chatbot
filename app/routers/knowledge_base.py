@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from app.dependencies import get_current_admin, get_db
 from app.models.admins import Admins
 from app.models.knowledge_base import Folders, Files
@@ -23,10 +23,13 @@ from sqlalchemy.exc import IntegrityError
 from uuid import UUID
 from pathlib import Path
 import uuid
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased
 from typing import List
 from app.core.config import settings
 from app.tasks.embedding_tasks import process_uploaded_files
+from pytz import timezone
+
+IST = timezone("Asia/Kolkata")
 
 
 router = APIRouter(prefix="/file_handling", tags=["KnowledgeBase"])
@@ -54,8 +57,9 @@ async def create_folder(
 
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
+        print(e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Folder Creation Failed! Try again.",
@@ -155,14 +159,52 @@ async def delete_folder(
     }
 
 
-@router.get("/folder_list", status_code=status.HTTP_200_OK, response_model=FolderList)
+@router.get(
+    "/folder_list",
+    status_code=status.HTTP_200_OK,
+    response_model=FolderList,
+)
 async def available_folders(
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
-    result = await db.execute(select(Folders).where(Folders.deleted.isnot(True)))
-    folders = result.scalars().all()
-    return {"status_code": status.HTTP_200_OK, "data": folders}
+    stmt = (
+        select(
+            Folders.id,
+            Folders.name,
+            Folders.created_at,
+            func.count(Files.id).label("file_count"),
+        )
+        .outerjoin(Files, Files.folder_id == Folders.id)
+        .where(Folders.deleted.isnot(True))
+        .group_by(Folders.id)
+        .order_by(Folders.created_at.desc())
+    )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    data = []
+    for row in rows:
+        created_at_ist = (
+            row.created_at.astimezone(IST)
+            if row.created_at.tzinfo
+            else IST.localize(row.created_at)
+        )
+
+        data.append(
+            {
+                "id": row.id,
+                "name": row.name,
+                "file_count": row.file_count,
+                "created_at": created_at_ist,
+            }
+        )
+
+    return {
+        "status_code": status.HTTP_200_OK,
+        "data": data,
+    }
 
 
 @router.get(

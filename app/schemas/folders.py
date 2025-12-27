@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from uuid import UUID
 from typing import List
+from datetime import datetime
 
 
 class FolderCreate(BaseModel):
@@ -39,6 +40,8 @@ class DeleteResponse(BaseModel):
 class DataFolder(BaseModel):
     id: UUID
     name: str
+    file_count: int
+    created_at: datetime  # IST timestamp
 
     class Config:
         from_attributes = True
