@@ -486,3 +486,73 @@ async def get_folder_files(
         "message": "Files fetched successfully",
         "data": data,
     }
+
+
+@router.get(
+    "/deleted_files",
+    status_code=status.HTTP_200_OK,
+    response_model=get_files_response,
+)
+async def get_folder_files(
+    payload: get_files,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admins = Depends(get_current_admin),
+):
+    # 1️⃣ Validate folder
+    result = await db.execute(
+        select(Folders).where(
+            Folders.id == payload.folder_id,
+            Folders.deleted.is_(False),
+        )
+    )
+    folder = result.scalar_one_or_none()
+
+    if not folder:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Folder not Found.",
+        )
+
+    # 2️⃣ Fetch files with creator info
+    stmt = (
+        select(
+            Files.id,
+            Files.original_filename,
+            Files.unique_name,
+            Files.created_at,
+            Admins.username.label("created_by"),
+        )
+        .join(Admins, Files.admin_id == Admins.id)
+        .where(
+            Files.folder_id == folder.id,
+            Files.deleted.is_(True),
+        )
+        .order_by(Files.created_at.desc())
+    )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    data = []
+    for row in rows:
+        created_at_ist = (
+            row.created_at.astimezone(IST)
+            if row.created_at.tzinfo
+            else IST.localize(row.created_at)
+        )
+
+        data.append(
+            {
+                "id": row.id,
+                "original_filename": row.original_filename,
+                "unique_name": row.unique_name,
+                "created_by": row.created_by,
+                "created_at": created_at_ist,
+            }
+        )
+
+    return {
+        "status_code": status.HTTP_200_OK,
+        "message": "Files fetched successfully",
+        "data": data,
+    }
