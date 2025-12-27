@@ -36,13 +36,18 @@ class get_files(BaseModel):
     folder_id: UUID
 
 
-class file(BaseModel):
+class FileData(BaseModel):
     id: UUID
     original_filename: str
     unique_name: str
+    created_by: str        # admin username
+    created_at: datetime  # IST
+
+    class Config:
+        from_attributes = True
 
 
 class get_files_response(BaseModel):
     status_code: int
     message: str
-    data: List[file]
+    data: List[FileData]
