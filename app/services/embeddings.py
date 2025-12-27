@@ -230,6 +230,51 @@ class EmbeddingService:
             "documents_by_type": file_types,
         }
 
+    def get_available_documents(self) -> dict:
+        """Get list of available documents/files in the index."""
+        if not self.index_file.exists():
+            return {
+                "exists": False,
+                "files": [],
+                "total_files": 0,
+                "total_chunks": 0,
+            }
+
+        with _faiss_lock:
+            vector_store = FAISS.load_local(
+                str(self.index_dir),
+                self.embeddings,
+                allow_dangerous_deserialization=True,
+            )
+
+            all_docs = vector_store.similarity_search("", k=100000)
+
+            # Extract unique files with their details
+            files_dict = {}
+
+            for doc in all_docs:
+                file_id = doc.metadata.get("file_id", "unknown")
+
+                if file_id not in files_dict:
+                    files_dict[file_id] = {
+                        "file_id": file_id,
+                        "filename": doc.metadata.get("original_filename", "Unknown"),
+                        "file_type": doc.metadata.get("file_type", "unknown"),
+                        "folder_id": doc.metadata.get("folder_id", "unknown"),
+                        "chunk_count": 0,
+                    }
+
+                files_dict[file_id]["chunk_count"] += 1
+
+        files_list = list(files_dict.values())
+
+        return {
+            "exists": True,
+            "files": files_list,
+            "total_files": len(files_list),
+            "total_chunks": len(all_docs),
+        }
+
 
 # Singleton instance
 embedding_service = EmbeddingService()
