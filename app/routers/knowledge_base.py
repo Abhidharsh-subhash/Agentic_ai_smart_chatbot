@@ -162,10 +162,6 @@ async def available_folders(
 ):
     result = await db.execute(select(Folders).where(Folders.deleted.isnot(True)))
     folders = result.scalars().all()
-    if len(folders) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No Folder Found"
-        )
     return {"status_code": status.HTTP_200_OK, "data": folders}
 
 
@@ -400,8 +396,6 @@ async def get_folder_files(
         select(Files).where(Files.folder_id == folder.id, Files.deleted.is_(False))
     )
     files = result.scalars().all()
-    if len(files) == 0:
-        raise HTTPException(status_code=status.HTTP_200_OK, detail="No files found")
     return {
         "status_code": status.HTTP_200_OK,
         "message": "Files fetched successfully",
