@@ -2,8 +2,17 @@ from fastapi import FastAPI, HTTPException, Request
 from app.core.events import lifespan
 from app.routers import api_router
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Convergent", lifespan=lifespan)
+# Allow all origins (any domain or IP)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # <-- this allows any domain
+    allow_credentials=True,  # allow cookies/auth headers
+    allow_methods=["*"],  # allow GET, POST, PUT, DELETE, etc.
+    allow_headers=["*"],  # allow all headers
+)
 app.include_router(api_router)
 
 
