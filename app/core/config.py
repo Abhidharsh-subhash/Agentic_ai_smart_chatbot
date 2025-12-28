@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # JWT
     secret_key: str = Field(env="SECRET_KEY")
     algorithm: str = Field(env="ALGORITHM")
-    access_token_expiry_time: int = Field(150, env="ACCESS_TOKEN_EXPIRE_TIME")
+    access_token_expiry_time: int = Field(1, env="ACCESS_TOKEN_EXPIRE_TIME")
     refresh_token_expiry_time: int = Field(300, env="REFRESH_TOKEN_EXPIRE_TIME")
 
     # Redis
