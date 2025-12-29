@@ -250,7 +250,6 @@ async def upload_files(
     result = await db.execute(
         select(Folders).where(
             Folders.id == folder_id,
-            Folders.admin_id == current_admin.id,
             Folders.deleted.is_(False),
         )
     )
