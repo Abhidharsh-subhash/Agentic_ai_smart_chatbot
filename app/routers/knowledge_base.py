@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from app.dependencies import get_current_admin, get_db
@@ -424,14 +424,15 @@ async def delete_file(
     response_model=get_files_response,
 )
 async def get_folder_files(
-    payload: get_files,
+
+    folder_id: UUID = Query(..., description="Folder ID"),
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
     # 1️⃣ Validate folder
     result = await db.execute(
         select(Folders).where(
-            Folders.id == payload.folder_id,
+            Folders.id == folder_id,
             Folders.deleted.is_(False),
         )
     )
