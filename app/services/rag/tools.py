@@ -7,7 +7,7 @@ from .analyzers import SearchResultAnalyzer
 
 
 @tool
-def search_documents(query: str, num_results: int = 5) -> str:
+def search_documents(query: str, num_results: int = 10) -> str:
     """
     Search the document database for relevant information.
     Returns search results with quality analysis.
