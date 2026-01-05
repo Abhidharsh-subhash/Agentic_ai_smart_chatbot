@@ -1,4 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    status,
+    UploadFile,
+    File,
+    Form,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from app.dependencies import get_current_admin, get_db
@@ -422,7 +431,6 @@ async def delete_file(
     response_model=get_files_response,
 )
 async def get_folder_files(
-
     folder_id: UUID = Query(..., description="Folder ID"),
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
@@ -448,6 +456,7 @@ async def get_folder_files(
             Files.id,
             Files.original_filename,
             Files.unique_name,
+            Files.admin_id,
             Files.created_at,
             Admins.username.label("created_by"),
         )
@@ -475,6 +484,7 @@ async def get_folder_files(
                 "id": row.id,
                 "original_filename": row.original_filename,
                 "unique_name": row.unique_name,
+                "admin_id": row.admin_id,
                 "created_by": row.created_by,
                 "created_at": created_at_ist,
             }
@@ -492,7 +502,7 @@ async def get_folder_files(
     status_code=status.HTTP_200_OK,
     response_model=get_files_response,
 )
-async def get_folder_files(
+async def get_deleted_files(
     payload: get_files,
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),

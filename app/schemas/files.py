@@ -40,6 +40,7 @@ class FileData(BaseModel):
     id: UUID
     original_filename: str
     unique_name: str
+    admin_id: UUID
     created_by: str        # admin username
     created_at: datetime  # IST
 
