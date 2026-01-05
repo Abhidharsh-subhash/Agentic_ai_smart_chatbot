@@ -239,7 +239,6 @@ async def upload_files(
     current_admin: Admins = Depends(get_current_admin),
 ):
     """Upload files and trigger embedding generation."""
-    print(f"files is {files}")
     if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

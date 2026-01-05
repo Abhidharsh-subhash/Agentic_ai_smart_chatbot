@@ -1,3 +1,4 @@
+# app/services/rag/tools.py
 import json
 from langchain_core.tools import tool
 from app.services.embeddings import embedding_service
@@ -10,6 +11,9 @@ def search_documents(query: str, num_results: int = 5) -> str:
     """
     Search the document database for relevant information.
     Returns search results with quality analysis.
+
+    IMPORTANT: The response will contain document content that you MUST use exactly as provided.
+    Do NOT add any information that is not in the documents.
     """
     # Check if index exists
     if not embedding_service.index_file.exists():
@@ -62,11 +66,21 @@ def search_documents(query: str, num_results: int = 5) -> str:
                 documents.append(
                     {
                         "content": doc.page_content,
+                        "score": float(score),
                         "relevance": (
                             "high" if float(score) < Config.GOOD_SCORE else "medium"
                         ),
                     }
                 )
+
+    # Add instruction for the LLM
+    instruction = ""
+    if documents:
+        instruction = (
+            "INSTRUCTION: Use ONLY the content from these documents to answer. "
+            "Do NOT add any external information, explanations, or general knowledge. "
+            "Report exactly what the documents say."
+        )
 
     return json.dumps(
         {
@@ -78,6 +92,7 @@ def search_documents(query: str, num_results: int = 5) -> str:
             "documents": documents,
             "count": len(documents),
             "reason": analysis["reason"],
+            "instruction": instruction,
         }
     )
 

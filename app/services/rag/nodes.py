@@ -1,4 +1,5 @@
 import json
+import re
 import random
 from typing import Literal
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
@@ -17,7 +18,7 @@ from .memory import memory_manager
 # Initialize LLMs
 llm = ChatOpenAI(
     model=settings.openai_model if hasattr(settings, "openai_model") else "gpt-4o",
-    temperature=0.1,
+    temperature=0.0,  # Set to 0 for more deterministic responses
     openai_api_key=settings.openai_api_key,
 )
 
@@ -32,82 +33,139 @@ llm_with_tools = llm.bind_tools(tools)
 
 
 # ============================================
-# SYSTEM PROMPTS
+# SYSTEM PROMPTS - UPDATED FOR STRICT RESPONSES
 # ============================================
 
-THINKING_PROMPT = """You are an analytical assistant. Your job is to understand the user's question and plan how to answer it.
+THINKING_PROMPT = """Analyze the user's question and plan how to search for the answer.
 
-## Conversation Context:
+Conversation Context:
 {conversation_context}
 
-## Topics Discussed Previously:
+Topics Discussed:
 {topics_discussed}
 
-## Current User Question:
+Current Question:
 {user_question}
 
-## Your Task:
-Analyze this question step by step and respond in JSON format:
+Respond with ONLY a JSON object (no markdown, no explanation, no code blocks):
 
-{{
-    "understanding": "What the user is really asking about (be specific)",
-    "is_follow_up": true/false (is this a follow-up to previous conversation?),
-    "referenced_context": "If follow-up, what previous context is being referenced?",
-    "key_topics": ["topic1", "topic2"],
-    "search_queries": ["optimized search query 1", "optimized search query 2"],
-    "reasoning": "Why these search queries will find the answer"
-}}
-
-Think carefully:
-1. Is this a follow-up question referencing previous conversation?
-2. What specific information does the user need?
-3. What are the best search terms to find this information?
-4. If it's a follow-up, incorporate context from previous discussion.
-
-Respond ONLY with valid JSON."""
+{{"understanding": "what the user is asking", "is_follow_up": false, "referenced_context": "", "key_topics": [], "search_queries": ["query1"], "reasoning": "why these queries"}}"""
 
 
-AGENT_SYSTEM_PROMPT = """You are a document-based support assistant with conversation memory.
+AGENT_SYSTEM_PROMPT = """You are a STRICT document-lookup assistant. You ONLY report what documents say.
 
 ## CONVERSATION CONTEXT:
 {conversation_context}
 
-## YOUR ANALYSIS (Chain of Thought):
+## YOUR ANALYSIS:
 {thinking_output}
 
-## RULES:
+## CRITICAL RULES - FOLLOW EXACTLY:
 
-### RULE 1: USE CONTEXT
-- Remember the conversation history
-- If this is a follow-up question, connect your answer to previous discussion
-- Reference previous topics when relevant
+### RULE 1: DOCUMENT-ONLY RESPONSES
+- ONLY provide information that is EXPLICITLY written in the search results
+- Do NOT add ANY information from your general knowledge
+- Do NOT explain, elaborate, or provide context beyond what documents say
+- Do NOT add warnings, advice, or "what could happen" statements
 
-### RULE 2: SEARCH FIRST
-- Call `search_documents` for questions
-- Use the optimized search queries from your analysis
-- Wait for search results before responding
+### RULE 2: EXACT EXTRACTION
+When documents contain a solution or answer:
+- Extract and report ONLY that solution/answer
+- Do NOT add reasons why it's important
+- Do NOT add what happens if they don't follow it
+- Do NOT add any "general" advice
 
-### RULE 3: ONLY USE SEARCH RESULTS
-- You can ONLY use information from search results
-- NEVER use general knowledge
-- NEVER make up information
+### RULE 3: FORBIDDEN - NEVER USE THESE:
+- "This could lead to..."
+- "It's important to..."
+- "Generally speaking..."
+- "In most cases..."
+- "To avoid issues..."
+- "You should also consider..."
+- "If you don't do this, then..."
+- Any explanatory or advisory content not in documents
 
-### RULE 4: CHECK `should_respond` FLAG
-- If `"should_respond": false` → say you don't have information
+### RULE 4: SEARCH FIRST
+- Call `search_documents` with the question
+- Check the `should_respond` field
+- If `should_respond: false` → say you don't have that information
 
 ### RULE 5: RESPONSE FORMAT
-- Provide clear, direct answers
-- If follow-up, connect to previous context
-- Be conversational and helpful
+- Be direct and brief
+- Only state what the document says
+- If document says "Solution: X" → respond with "The solution is X"
+- Nothing more, nothing less
 
-### RULE 6: FOR FOLLOW-UP QUESTIONS
-- Acknowledge the connection to previous discussion
-- Use context from previous turns
-- Provide coherent, contextual responses"""
+### EXAMPLE:
+Document content: "Issue: Old passport not submitted. Solution: Collected previous passport copies and attached them to the application."
+
+CORRECT Response: "The solution is to collect previous passport copies and attach them to the application."
+
+WRONG Response: "If you did not submit your old passport, it could lead to issues such as delays or rejection... [any general knowledge]"
+
+You are a lookup tool. Report only what documents say. No advice. No elaboration."""
 
 
 # Tool node
 tool_node = ToolNode(tools)
+
+
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+
+def extract_json_from_response(response_text: str) -> dict:
+    """Extract JSON from LLM response, handling various formats."""
+    if not response_text:
+        raise ValueError("Empty response")
+
+    text = response_text.strip()
+
+    # Try direct JSON parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to extract from markdown code blocks
+    code_block_patterns = [
+        r"```json\s*([\s\S]*?)\s*```",
+        r"```\s*([\s\S]*?)\s*```",
+    ]
+
+    for pattern in code_block_patterns:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                return json.loads(match.group(1).strip())
+            except json.JSONDecodeError:
+                continue
+
+    # Try to find JSON object in the text
+    json_match = re.search(r"\{[^{}]*\}", text)
+    if json_match:
+        try:
+            return json.loads(json_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find nested JSON
+    brace_start = text.find("{")
+    if brace_start != -1:
+        brace_count = 0
+        for i, char in enumerate(text[brace_start:], brace_start):
+            if char == "{":
+                brace_count += 1
+            elif char == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    try:
+                        return json.loads(text[brace_start : i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    raise ValueError(f"Could not extract JSON from: {text[:200]}")
 
 
 # ============================================
@@ -208,7 +266,7 @@ def think_and_plan(state: AgentState) -> dict:
     if not user_question:
         return {
             "thinking": None,
-            "planned_search_queries": [],
+            "planned_search_queries": [user_question] if user_question else [],
         }
 
     # Get conversation memory
@@ -225,11 +283,15 @@ def think_and_plan(state: AgentState) -> dict:
 
     try:
         response = thinking_llm.invoke([SystemMessage(content=prompt)])
+        response_text = response.content.strip() if response.content else ""
 
-        # Parse JSON response
-        thinking_output = json.loads(response.content)
+        if not response_text:
+            raise ValueError("Empty response from thinking LLM")
 
-        # Validate required fields
+        # Extract JSON from response
+        thinking_output = extract_json_from_response(response_text)
+
+        # Validate and build thinking dict
         thinking = {
             "understanding": thinking_output.get("understanding", user_question),
             "key_topics": thinking_output.get("key_topics", []),
@@ -239,6 +301,10 @@ def think_and_plan(state: AgentState) -> dict:
             "referenced_context": thinking_output.get("referenced_context", ""),
         }
 
+        # Ensure search_queries is not empty
+        if not thinking["search_queries"]:
+            thinking["search_queries"] = [user_question]
+
         return {
             "thinking": thinking,
             "planned_search_queries": thinking["search_queries"],
@@ -247,15 +313,15 @@ def think_and_plan(state: AgentState) -> dict:
             "follow_up_context": thinking["referenced_context"] or "",
         }
 
-    except (json.JSONDecodeError, Exception) as e:
+    except Exception as e:
         print(f"[CoT] Error in thinking: {e}")
-        # Fallback - use original query
+        # Fallback - use original query directly
         return {
             "thinking": {
                 "understanding": user_question,
                 "key_topics": [],
                 "search_queries": [user_question],
-                "reasoning": "Direct search",
+                "reasoning": "Direct search fallback",
                 "is_follow_up": state.get("is_follow_up_question", False),
                 "referenced_context": "",
             },
@@ -402,11 +468,10 @@ def ask_clarification(state: AgentState) -> dict:
 
 
 def agent(state: AgentState) -> dict:
-    """Main agent node with CoT context."""
+    """Main agent node with strict document-only responses."""
     messages = state["messages"]
     context = state.get("context", {})
     session_id = context.get("session_id", "default")
-    topic_history = state.get("topic_history", [])
     thinking = state.get("thinking", {})
 
     # Get conversation memory
@@ -418,10 +483,8 @@ def agent(state: AgentState) -> dict:
         thinking_str = f"""
 Understanding: {thinking.get('understanding', 'N/A')}
 Is Follow-up: {thinking.get('is_follow_up', False)}
-Referenced Context: {thinking.get('referenced_context', 'None')}
 Key Topics: {', '.join(thinking.get('key_topics', []))}
-Search Strategy: {thinking.get('reasoning', 'Direct search')}
-Planned Queries: {', '.join(thinking.get('search_queries', []))}
+Search Queries: {', '.join(thinking.get('search_queries', []))}
 """
     else:
         thinking_str = "No prior analysis available."
@@ -489,7 +552,6 @@ def handle_not_found(state: AgentState) -> dict:
     not_found_message = state.get("not_found_message")
 
     if not not_found_message:
-        # Check if follow-up and provide contextual response
         if state.get("is_follow_up_question"):
             not_found_message = (
                 "I don't have additional information about that in my knowledge base. "
@@ -574,7 +636,6 @@ def route_after_analysis(
         if attempts < 2:
             return "ask_clarification"
 
-    # Go to Chain of Thought first
     return "think_and_plan"
 
 

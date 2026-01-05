@@ -268,3 +268,59 @@ class ResponseSanitizer:
         sanitized = re.sub(r"\s{2,}", " ", sanitized)
         sanitized = re.sub(r"\s+([.,!?])", r"\1", sanitized)
         return sanitized.strip()
+
+
+# Add to app/services/rag/analyzers.py
+
+
+class HallucinationDetector:
+    """Detect and filter hallucinated content."""
+
+    # Phrases that typically indicate hallucination/general knowledge
+    HALLUCINATION_INDICATORS = [
+        r"(?i)this could lead to",
+        r"(?i)it('s| is) important to",
+        r"(?i)generally speaking",
+        r"(?i)in most cases",
+        r"(?i)typically,",
+        r"(?i)usually,",
+        r"(?i)you should (also )?consider",
+        r"(?i)to avoid (any )?(potential )?issues",
+        r"(?i)it('s| is) (also )?recommended",
+        r"(?i)best practice",
+        r"(?i)keep in mind",
+        r"(?i)be aware that",
+        r"(?i)note that",
+        r"(?i)remember that",
+        r"(?i)from (my|general) knowledge",
+        r"(?i)based on (my|general) (knowledge|understanding)",
+        r"(?i)as a general rule",
+        r"(?i)in general,",
+        r"(?i)commonly,",
+        r"(?i)often,",
+        r"(?i)may (also )?result in",
+        r"(?i)could (also )?cause",
+        r"(?i)might (also )?lead to",
+        r"(?i)to ensure",
+        r"(?i)to prevent",
+        r"(?i)for (your )?safety",
+        r"(?i)as soon as possible",
+        r"(?i)it would be (wise|advisable)",
+    ]
+
+    @classmethod
+    def contains_hallucination(cls, response: str) -> bool:
+        """Check if response contains hallucination indicators."""
+        for pattern in cls.HALLUCINATION_INDICATORS:
+            if re.search(pattern, response):
+                return True
+        return False
+
+    @classmethod
+    def get_hallucination_phrases(cls, response: str) -> list:
+        """Get list of detected hallucination phrases."""
+        found = []
+        for pattern in cls.HALLUCINATION_INDICATORS:
+            matches = re.findall(pattern, response)
+            found.extend(matches)
+        return found

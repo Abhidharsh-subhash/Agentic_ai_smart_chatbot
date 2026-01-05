@@ -1,4 +1,4 @@
-import asyncio
+import asyncio, json
 from datetime import datetime
 from typing import List, Optional
 from langchain_core.messages import HumanMessage, AIMessage
@@ -111,11 +111,20 @@ class ChatbotService:
                 is_not_found = result.get("should_respond_not_found", False)
 
                 if not is_not_found:
+                    # Check for general knowledge/hallucination
                     if ResponseSanitizer.contains_general_knowledge(response):
-                        response = (
-                            "I don't have specific information about that in my knowledge base. "
-                            "Could you try asking about a different topic?"
-                        )
+                        # Get the search results from the state if available
+                        search_results = result.get("search_results", "")
+                        if search_results:
+                            # Try to extract just the document content
+                            response = self._extract_document_answer(
+                                search_results, message
+                            )
+                        else:
+                            response = (
+                                "I found some information but I'm not certain it directly answers your question. "
+                                "Could you try rephrasing?"
+                            )
                     else:
                         response = ResponseSanitizer.sanitize(response)
 
@@ -127,6 +136,26 @@ class ChatbotService:
                 return response
 
         return "I couldn't generate a response. Please try again."
+
+    def _extract_document_answer(self, search_results: str, question: str) -> str:
+        """Extract a simple answer from search results without hallucination."""
+        try:
+            results = (
+                json.loads(search_results)
+                if isinstance(search_results, str)
+                else search_results
+            )
+            documents = results.get("documents", [])
+
+            if documents:
+                # Return the most relevant document content
+                best_doc = documents[0].get("content", "")
+                if best_doc:
+                    return f"Based on the documentation: {best_doc}"
+
+            return "I found related information but couldn't extract a clear answer."
+        except:
+            return "I found related information but couldn't extract a clear answer."
 
     def chat_sync(self, message: str) -> str:
         """Synchronous chat method."""
