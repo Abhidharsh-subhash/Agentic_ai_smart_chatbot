@@ -150,7 +150,7 @@ async def delete_folder(
         )
     if folder.admin_id != current_admin.id:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="You are not authorized to delete the folder.",
         )
     folder.deleted = True
@@ -503,14 +503,14 @@ async def get_folder_files(
     response_model=get_files_response,
 )
 async def get_deleted_files(
-    payload: get_files,
+    folder_id: UUID = Query(..., description="Folder ID"),
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
     # 1️⃣ Validate folder
     result = await db.execute(
         select(Folders).where(
-            Folders.id == payload.folder_id,
+            Folders.id == folder_id,
             Folders.deleted.is_(False),
         )
     )
@@ -528,6 +528,7 @@ async def get_deleted_files(
             Files.id,
             Files.original_filename,
             Files.unique_name,
+            Files.admin_id,
             Files.created_at,
             Admins.username.label("created_by"),
         )
@@ -555,6 +556,7 @@ async def get_deleted_files(
                 "id": row.id,
                 "original_filename": row.original_filename,
                 "unique_name": row.unique_name,
+                "admin_id": row.admin_id,
                 "created_by": row.created_by,
                 "created_at": created_at_ist,
             }
