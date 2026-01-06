@@ -1,5 +1,5 @@
 import asyncio
-import json
+import json, re
 from datetime import datetime
 from typing import List, Optional
 from langchain_core.messages import HumanMessage, AIMessage
@@ -158,8 +158,14 @@ class ChatbotService:
 
             if documents:
                 best_doc = documents[0].get("content", "")
-                if best_doc:
-                    return f"Based on the documentation: {best_doc}"
+
+                # Simple cleanup if the doc starts with "Answer:" or number
+                clean_doc = re.sub(
+                    r"^(Answer:|Question:|\d+\.)\s*", "", best_doc, flags=re.IGNORECASE
+                ).strip()
+
+                if clean_doc:
+                    return clean_doc
 
             return "I found related information but couldn't extract a clear answer."
         except:

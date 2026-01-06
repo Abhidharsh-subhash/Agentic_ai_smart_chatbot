@@ -147,12 +147,6 @@ class ScenarioDetector:
     def detect_scenarios(cls, documents: List[dict], query: str) -> Dict:
         """
         Analyze documents to detect if there are multiple scenarios/conditions.
-
-        Returns:
-            dict with:
-            - has_multiple_scenarios: bool
-            - scenarios: List of detected scenarios
-            - clarification_question: Suggested question to ask
         """
         if not documents:
             return {
@@ -164,6 +158,34 @@ class ScenarioDetector:
 
         all_content = " ".join([doc.get("content", "") for doc in documents])
         content_lower = all_content.lower()
+
+        # --- NEW LOGIC START: Check for Direct Answer Override ---
+
+        # 1. Length Check: If the total content is short, it's likely a single definition
+        # that happens to have "if/else" inside it (like your fee example).
+        is_short_content = len(all_content) < Config.MAX_CHARS_FOR_DIRECT_ANSWER
+
+        # 2. Intent Check: "What is" questions usually expect a definition,
+        # whereas "How do I" or "My X failed" usually expect a specific path.
+        query_lower = query.lower().strip()
+        is_factual_question = (
+            query_lower.startswith("what is")
+            or query_lower.startswith("what are")
+            or query_lower.startswith("how much")
+            or query_lower.startswith("cost of")
+            or "fee" in query_lower
+            or "price" in query_lower
+        )
+
+        # If it is a short factual answer, bypass scenario detection
+        if is_short_content and is_factual_question:
+            return {
+                "has_multiple_scenarios": False,
+                "scenarios": [],
+                "clarification_question": None,
+                "confidence": 0.0,
+            }
+        # --- NEW LOGIC END ---
 
         # Check for multi-scenario keywords
         keyword_matches = sum(
@@ -194,6 +216,13 @@ class ScenarioDetector:
 
         # Determine if we have multiple meaningful scenarios
         has_multiple = len(scenarios) >= Config.MIN_SCENARIOS_FOR_CLARIFICATION
+
+        # --- NEW LOGIC: Secondary Safety Check ---
+        # Even if we found scenarios via Regex, if the content is extremely short,
+        # it's annoying to ask for clarification. Just show the text.
+        if has_multiple and len(all_content) < 300:
+            has_multiple = False
+        # ----------------------------------------
 
         # Generate clarification question
         clarification_question = None

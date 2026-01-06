@@ -27,6 +27,11 @@ class Config:
     MIN_SCENARIOS_FOR_CLARIFICATION = 2
     MAX_CLARIFICATION_ATTEMPTS = 3
 
+    # NEW: Thresholds for skipping clarification
+    # If the total relevant content is shorter than this (characters),
+    # just show it as a direct answer instead of asking clarifying questions.
+    MAX_CHARS_FOR_DIRECT_ANSWER = 450
+
 
 class SearchQuality(str, Enum):
     EXCELLENT = "excellent"
