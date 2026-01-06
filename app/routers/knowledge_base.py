@@ -37,6 +37,7 @@ from typing import List
 from app.core.config import settings
 from app.tasks.embedding_tasks import process_uploaded_files
 from pytz import timezone
+from fastapi.responses import FileResponse
 
 IST = timezone("Asia/Kolkata")
 
@@ -386,6 +387,54 @@ async def upload_files(
         "skipped_files": skipped_files,
         "task_id": task.id,
     }
+
+
+@router.get(
+    "/download_file",
+    status_code=status.HTTP_200_OK,
+)
+async def download_file(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admins = Depends(get_current_admin),
+):
+    # 1. Fetch file record
+    result = await db.execute(
+        select(Files).where(
+            Files.id == file_id,
+            Files.deleted.is_(False),
+        )
+    )
+    file = result.scalar_one_or_none()
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found",
+        )
+
+    # 2. Authorization check
+    # if file.admin_id != current_admin.id:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="You are not authorized to download this file",
+    #     )
+
+    # 3. Resolve file path
+    file_path = UPLOAD_DIR / file.unique_name
+
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="File does not exist on disk",
+        )
+
+    # 4. Send file with original filename
+    return FileResponse(
+        path=file_path,
+        filename=file.original_filename,
+        media_type="application/octet-stream",
+    )
 
 
 @router.get("/task/{task_id}")
