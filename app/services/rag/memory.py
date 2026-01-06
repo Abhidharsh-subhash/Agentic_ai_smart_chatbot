@@ -1,17 +1,28 @@
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
-import json
 
 
 @dataclass
 class ConversationTurn:
     """Single turn in conversation."""
 
-    role: str  # "user" or "assistant"
+    role: str
     content: str
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     topics: List[str] = field(default_factory=list)
+    turn_type: str = "normal"  # normal, clarification, scenario_selection
+
+
+@dataclass
+class PendingClarification:
+    """Tracks pending clarification requests."""
+
+    original_query: str
+    clarification_type: str  # "scenario", "ambiguous", "incomplete"
+    scenarios: List[dict] = field(default_factory=list)
+    attempts: int = 0
+    raw_documents: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -22,22 +33,76 @@ class ConversationMemory:
     turns: List[ConversationTurn] = field(default_factory=list)
     summary: str = ""
     key_topics: List[str] = field(default_factory=list)
-    max_turns: int = 20  # Keep last N turns
+    max_turns: int = 20
 
-    def add_user_message(self, content: str, topics: List[str] = None):
+    # NEW: Pending clarification tracking
+    pending_clarification: Optional[PendingClarification] = None
+
+    # NEW: User preferences learned during conversation
+    user_context: Dict = field(default_factory=dict)
+
+    def add_user_message(
+        self, content: str, topics: List[str] = None, turn_type: str = "normal"
+    ):
         """Add user message to memory."""
         self.turns.append(
-            ConversationTurn(role="user", content=content, topics=topics or [])
+            ConversationTurn(
+                role="user", content=content, topics=topics or [], turn_type=turn_type
+            )
         )
         self._trim_history()
         self._update_topics(topics or [])
 
-    def add_assistant_message(self, content: str, topics: List[str] = None):
+    def add_assistant_message(
+        self, content: str, topics: List[str] = None, turn_type: str = "normal"
+    ):
         """Add assistant message to memory."""
         self.turns.append(
-            ConversationTurn(role="assistant", content=content, topics=topics or [])
+            ConversationTurn(
+                role="assistant",
+                content=content,
+                topics=topics or [],
+                turn_type=turn_type,
+            )
         )
         self._trim_history()
+
+    def set_pending_clarification(
+        self,
+        original_query: str,
+        clarification_type: str,
+        scenarios: List[dict] = None,
+        raw_documents: List[dict] = None,
+    ):
+        """Set a pending clarification request."""
+        self.pending_clarification = PendingClarification(
+            original_query=original_query,
+            clarification_type=clarification_type,
+            scenarios=scenarios or [],
+            attempts=0,
+            raw_documents=raw_documents or [],
+        )
+
+    def clear_pending_clarification(self):
+        """Clear pending clarification."""
+        self.pending_clarification = None
+
+    def has_pending_clarification(self) -> bool:
+        """Check if there's a pending clarification."""
+        return self.pending_clarification is not None
+
+    def increment_clarification_attempt(self):
+        """Increment clarification attempt counter."""
+        if self.pending_clarification:
+            self.pending_clarification.attempts += 1
+
+    def update_user_context(self, key: str, value: any):
+        """Update user context with learned information."""
+        self.user_context[key] = value
+
+    def get_user_context(self, key: str, default=None):
+        """Get user context value."""
+        return self.user_context.get(key, default)
 
     def _trim_history(self):
         """Keep only the last max_turns."""
@@ -49,18 +114,18 @@ class ConversationMemory:
         for topic in new_topics:
             if topic not in self.key_topics:
                 self.key_topics.append(topic)
-        # Keep last 10 topics
         self.key_topics = self.key_topics[-10:]
 
     def get_last_n_turns(self, n: int = 5) -> List[Dict]:
         """Get last N conversation turns."""
         return [
-            {"role": turn.role, "content": turn.content} for turn in self.turns[-n:]
+            {"role": turn.role, "content": turn.content, "type": turn.turn_type}
+            for turn in self.turns[-n:]
         ]
 
     def get_last_user_query(self) -> Optional[str]:
         """Get the last user query."""
-        for turn in reversed(self.turns[:-1]):  # Exclude current
+        for turn in reversed(self.turns[:-1]):
             if turn.role == "user":
                 return turn.content
         return None
@@ -98,7 +163,6 @@ class ConversationMemory:
 
         current_lower = current_query.lower().strip()
 
-        # Check for pronouns and references
         follow_up_indicators = [
             "it",
             "this",
@@ -107,11 +171,9 @@ class ConversationMemory:
             "those",
             "they",
             "them",
-            "their",
             "more",
             "else",
             "another",
-            "other",
             "also",
             "and",
             "but",
@@ -124,23 +186,13 @@ class ConversationMemory:
             "why",
             "how",
             "when",
-            "where",
-            "the same",
-            "similar",
-            "previous",
-            "earlier",
-            "before",
-            "you mentioned",
-            "you said",
         ]
 
-        # Short queries are often follow-ups
         if len(current_lower.split()) <= 4:
             for indicator in follow_up_indicators:
                 if indicator in current_lower:
                     return True
 
-        # Check if query starts with follow-up patterns
         follow_up_starts = [
             "what about",
             "how about",
@@ -152,8 +204,6 @@ class ConversationMemory:
             "what if",
             "why ",
             "how ",
-            "is it",
-            "are they",
         ]
 
         for start in follow_up_starts:
@@ -167,6 +217,8 @@ class ConversationMemory:
         self.turns = []
         self.summary = ""
         self.key_topics = []
+        self.pending_clarification = None
+        self.user_context = {}
 
 
 class MemoryManager:
@@ -191,5 +243,4 @@ class MemoryManager:
         self._memories.clear()
 
 
-# Global memory manager
 memory_manager = MemoryManager()

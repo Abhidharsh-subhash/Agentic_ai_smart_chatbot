@@ -15,13 +15,17 @@ class Config:
     ACCEPTABLE_SCORE = 1.2
 
     # If best score is above this, consider it "not found"
-    NOT_FOUND_SCORE_THRESHOLD = 1.
+    NOT_FOUND_SCORE_THRESHOLD = 1.5
 
     # Minimum number of relevant results needed
     MIN_RELEVANT_RESULTS = 1
 
     # Search settings
     DEFAULT_NUM_RESULTS = 10
+
+    # Scenario detection settings
+    MIN_SCENARIOS_FOR_CLARIFICATION = 2
+    MAX_CLARIFICATION_ATTEMPTS = 3
 
 
 class SearchQuality(str, Enum):
@@ -38,3 +42,13 @@ class InteractionMode(str, Enum):
     CLARIFICATION = "clarification"
     NOT_FOUND = "not_found"
     CLOSING = "closing"
+    SCENARIO_SELECTION = "scenario_selection"  # NEW
+
+
+class SupportMode(str, Enum):
+    """Support agent response modes."""
+
+    DIRECT_ANSWER = "direct_answer"
+    NEED_CLARIFICATION = "need_clarification"
+    SCENARIO_SELECTION = "scenario_selection"
+    FOLLOW_UP = "follow_up"

@@ -1,6 +1,7 @@
 import re
 import random
-from typing import List, Optional
+import json
+from typing import List, Optional, Dict
 from .config import Config, SearchQuality
 
 
@@ -11,14 +12,6 @@ class SearchResultAnalyzer:
     def analyze(cls, results: list, query: str) -> dict:
         """
         Analyze search results and determine quality.
-
-        Returns dict with:
-        - found_relevant_info: bool
-        - confidence: float (0-1)
-        - quality: SearchQuality
-        - best_score: float
-        - should_respond: bool
-        - reason: str
         """
         if not results:
             return {
@@ -31,16 +24,13 @@ class SearchResultAnalyzer:
                 "relevant_count": 0,
             }
 
-        # Extract scores (lower is better for FAISS L2)
         scores = [float(score) for _, score in results]
         best_score = min(scores)
         avg_score = sum(scores) / len(scores)
 
-        # Count relevant results
         relevant_results = [s for s in scores if s < Config.ACCEPTABLE_SCORE]
         relevant_count = len(relevant_results)
 
-        # Determine quality and confidence
         if best_score < Config.EXCELLENT_SCORE:
             quality = SearchQuality.EXCELLENT.value
             confidence = 0.95
@@ -57,7 +47,6 @@ class SearchResultAnalyzer:
             quality = SearchQuality.NOT_FOUND.value
             confidence = 0.0
 
-        # Check keyword overlap
         query_keywords = set(query.lower().split())
         keyword_matches = 0
 
@@ -70,7 +59,6 @@ class SearchResultAnalyzer:
 
         keyword_relevance = keyword_matches / max(len(query_keywords), 1)
 
-        # Final determination
         should_respond = (
             quality != SearchQuality.NOT_FOUND.value
             and relevant_count >= Config.MIN_RELEVANT_RESULTS
@@ -79,7 +67,6 @@ class SearchResultAnalyzer:
             )
         )
 
-        # Reason for decision
         if not should_respond:
             if quality == SearchQuality.NOT_FOUND.value:
                 reason = "No relevant information found in knowledge base"
@@ -101,6 +88,256 @@ class SearchResultAnalyzer:
             "relevant_count": relevant_count,
             "keyword_relevance": keyword_relevance,
         }
+
+
+class ScenarioDetector:
+    """Detect and extract multiple scenarios/conditions from search results."""
+
+    # Patterns that indicate conditional/scenario-based content
+    SCENARIO_PATTERNS = [
+        # Conditional patterns
+        (r"(?i)if\s+you\s+(have|are|want|need|don't|do not)\s+([^,.:]+)", "condition"),
+        (r"(?i)in\s+case\s+(of|you)\s+([^,.:]+)", "condition"),
+        (r"(?i)when\s+(you|the|your)\s+([^,.:]+)", "condition"),
+        (
+            r"(?i)for\s+(new|existing|individual|business|corporate|first[- ]time)\s+([^,.:]+)",
+            "user_type",
+        ),
+        # Explicit scenario markers
+        (
+            r"(?i)(option|scenario|method|type|case|situation)\s*(\d+|[a-c])\s*[:\-]?\s*([^.]+)",
+            "explicit",
+        ),
+        # Either/or patterns
+        (r"(?i)(either|or)\s+([^,.:]+)", "alternative"),
+        # Dependency patterns
+        (r"(?i)depending\s+on\s+(your|the|whether)\s+([^,.:]+)", "dependency"),
+        (r"(?i)based\s+on\s+(your|the)\s+([^,.:]+)", "dependency"),
+        # Multiple solution patterns
+        (r"(?i)(solution|step|approach)\s*(\d+)\s*[:\-]", "numbered"),
+        # Conditional then patterns
+        (r"(?i)if\s+([^,]+),\s*(then\s+)?([^.]+)", "if_then"),
+    ]
+
+    # Keywords that often indicate multiple scenarios
+    MULTI_SCENARIO_KEYWORDS = [
+        "depends",
+        "depending",
+        "based on",
+        "varies",
+        "different",
+        "options",
+        "alternatives",
+        "either",
+        "or",
+        "choose",
+        "if you have",
+        "if you are",
+        "in case of",
+        "when you",
+        "for new",
+        "for existing",
+        "type a",
+        "type b",
+        "option 1",
+        "option 2",
+    ]
+
+    @classmethod
+    def detect_scenarios(cls, documents: List[dict], query: str) -> Dict:
+        """
+        Analyze documents to detect if there are multiple scenarios/conditions.
+
+        Returns:
+            dict with:
+            - has_multiple_scenarios: bool
+            - scenarios: List of detected scenarios
+            - clarification_question: Suggested question to ask
+        """
+        if not documents:
+            return {
+                "has_multiple_scenarios": False,
+                "scenarios": [],
+                "clarification_question": None,
+                "confidence": 0.0,
+            }
+
+        all_content = " ".join([doc.get("content", "") for doc in documents])
+        content_lower = all_content.lower()
+
+        # Check for multi-scenario keywords
+        keyword_matches = sum(
+            1 for kw in cls.MULTI_SCENARIO_KEYWORDS if kw in content_lower
+        )
+
+        # Extract scenarios using patterns
+        scenarios = []
+        scenario_id = 1
+
+        for pattern, pattern_type in cls.SCENARIO_PATTERNS:
+            matches = re.finditer(pattern, all_content)
+            for match in matches:
+                scenario = cls._extract_scenario_from_match(
+                    match, pattern_type, scenario_id
+                )
+                if scenario and not cls._is_duplicate_scenario(scenario, scenarios):
+                    scenarios.append(scenario)
+                    scenario_id += 1
+
+        # Also try to detect scenarios using LLM-friendly structure detection
+        structured_scenarios = cls._detect_structured_scenarios(documents)
+        for s in structured_scenarios:
+            if not cls._is_duplicate_scenario(s, scenarios):
+                s["id"] = str(scenario_id)
+                scenarios.append(s)
+                scenario_id += 1
+
+        # Determine if we have multiple meaningful scenarios
+        has_multiple = len(scenarios) >= Config.MIN_SCENARIOS_FOR_CLARIFICATION
+
+        # Generate clarification question
+        clarification_question = None
+        if has_multiple:
+            clarification_question = cls._generate_clarification_question(
+                scenarios, query
+            )
+
+        return {
+            "has_multiple_scenarios": has_multiple,
+            "scenarios": scenarios[:5],  # Limit to 5 scenarios
+            "clarification_question": clarification_question,
+            "confidence": min(
+                0.9, 0.3 + (keyword_matches * 0.1) + (len(scenarios) * 0.15)
+            ),
+        }
+
+    @classmethod
+    def _extract_scenario_from_match(
+        cls, match, pattern_type: str, scenario_id: int
+    ) -> Optional[dict]:
+        """Extract scenario information from regex match."""
+        try:
+            groups = match.groups()
+
+            if pattern_type == "condition" and len(groups) >= 2:
+                return {
+                    "id": str(scenario_id),
+                    "condition": f"{groups[0]} {groups[1]}".strip(),
+                    "description": match.group(0).strip(),
+                    "type": pattern_type,
+                }
+            elif pattern_type == "explicit" and len(groups) >= 3:
+                return {
+                    "id": str(scenario_id),
+                    "condition": f"{groups[0]} {groups[1]}".strip(),
+                    "description": (
+                        groups[2].strip() if groups[2] else match.group(0).strip()
+                    ),
+                    "type": pattern_type,
+                }
+            elif pattern_type == "if_then" and len(groups) >= 3:
+                return {
+                    "id": str(scenario_id),
+                    "condition": groups[0].strip(),
+                    "description": (groups[2] or "").strip(),
+                    "type": pattern_type,
+                }
+            elif pattern_type in ["dependency", "user_type", "alternative"]:
+                return {
+                    "id": str(scenario_id),
+                    "condition": " ".join(g for g in groups if g).strip(),
+                    "description": match.group(0).strip(),
+                    "type": pattern_type,
+                }
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _detect_structured_scenarios(cls, documents: List[dict]) -> List[dict]:
+        """Detect scenarios from document structure (bullets, numbers, etc.)."""
+        scenarios = []
+
+        for doc in documents:
+            content = doc.get("content", "")
+
+            # Look for bullet points or numbered lists that might be scenarios
+            lines = content.split("\n")
+            current_scenarios = []
+
+            for line in lines:
+                line = line.strip()
+                # Check for list items that look like scenarios
+                if re.match(
+                    r"^[\-\*\•]\s*(?:If|When|For|In case)", line, re.IGNORECASE
+                ):
+                    current_scenarios.append(
+                        {
+                            "condition": line.lstrip("-*• "),
+                            "description": line,
+                            "type": "structured",
+                        }
+                    )
+                elif re.match(
+                    r"^\d+[\.\)]\s*(?:If|When|For|In case)", line, re.IGNORECASE
+                ):
+                    current_scenarios.append(
+                        {
+                            "condition": re.sub(r"^\d+[\.\)]\s*", "", line),
+                            "description": line,
+                            "type": "structured",
+                        }
+                    )
+
+            scenarios.extend(current_scenarios)
+
+        return scenarios
+
+    @classmethod
+    def _is_duplicate_scenario(cls, new_scenario: dict, existing: List[dict]) -> bool:
+        """Check if scenario is a duplicate of existing ones."""
+        new_cond = new_scenario.get("condition", "").lower()
+        for s in existing:
+            existing_cond = s.get("condition", "").lower()
+            # Check for significant overlap
+            if new_cond in existing_cond or existing_cond in new_cond:
+                return True
+            # Check word overlap
+            new_words = set(new_cond.split())
+            existing_words = set(existing_cond.split())
+            if (
+                len(new_words) > 2
+                and len(new_words & existing_words) / len(new_words) > 0.7
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _generate_clarification_question(
+        cls, scenarios: List[dict], original_query: str
+    ) -> str:
+        """Generate a clarification question based on detected scenarios."""
+        if not scenarios:
+            return "Could you provide more details about your specific situation?"
+
+        # Build options from scenarios
+        options = []
+        for i, scenario in enumerate(scenarios[:4], 1):
+            condition = scenario.get("condition", scenario.get("description", ""))
+            # Clean and truncate
+            condition = re.sub(r"\s+", " ", condition).strip()
+            if len(condition) > 100:
+                condition = condition[:97] + "..."
+            options.append(f"{i}. {condition}")
+
+        question = (
+            f"I found information that applies to different situations. "
+            f"To give you the most accurate answer, could you tell me which scenario applies to you?\n\n"
+            + "\n".join(options)
+            + "\n\nPlease reply with the number or describe your situation."
+        )
+
+        return question
 
 
 class QueryAnalyzer:
@@ -141,6 +378,17 @@ class QueryAnalyzer:
         "thx",
     ]
 
+    # Patterns that indicate user is selecting a scenario
+    SCENARIO_SELECTION_PATTERNS = [
+        r"^[1-5]$",  # Just a number
+        r"^option\s*[1-5]$",
+        r"^scenario\s*[1-5]$",
+        r"^the\s*(first|second|third|fourth|fifth)\s*one",
+        r"^(first|second|third|fourth|fifth)\s*option",
+        r"^number\s*[1-5]$",
+        r"^#\s*[1-5]$",
+    ]
+
     @classmethod
     def analyze(cls, query: str, context: dict = None) -> dict:
         """Analyze query for clarity."""
@@ -152,7 +400,16 @@ class QueryAnalyzer:
             "clarification_type": None,
             "follow_up_questions": [],
             "confidence": 0.8,
+            "is_scenario_selection": False,
+            "selected_scenario": None,
         }
+
+        # Check if this is a scenario selection response
+        scenario_selection = cls._check_scenario_selection(query_lower)
+        if scenario_selection:
+            analysis["is_scenario_selection"] = True
+            analysis["selected_scenario"] = scenario_selection
+            return analysis
 
         if len(query_lower) < 2:
             analysis["is_clear"] = False
@@ -180,6 +437,37 @@ class QueryAnalyzer:
         return analysis
 
     @classmethod
+    def _check_scenario_selection(cls, query: str) -> Optional[str]:
+        """Check if the query is selecting a scenario."""
+        query_clean = query.strip().lower()
+
+        # Direct number
+        if query_clean.isdigit() and 1 <= int(query_clean) <= 5:
+            return query_clean
+
+        # Pattern matching
+        for pattern in cls.SCENARIO_SELECTION_PATTERNS:
+            match = re.match(pattern, query_clean, re.IGNORECASE)
+            if match:
+                # Extract the number
+                num_match = re.search(r"[1-5]", query_clean)
+                if num_match:
+                    return num_match.group()
+                # Handle word numbers
+                word_to_num = {
+                    "first": "1",
+                    "second": "2",
+                    "third": "3",
+                    "fourth": "4",
+                    "fifth": "5",
+                }
+                for word, num in word_to_num.items():
+                    if word in query_clean:
+                        return num
+
+        return None
+
+    @classmethod
     def is_greeting(cls, query: str) -> bool:
         return query.lower().strip().rstrip("!.,") in cls.GREETINGS
 
@@ -196,14 +484,12 @@ class NotFoundResponseGenerator:
         "general": [
             "I don't have information about that in my knowledge base. Could you try asking about a different topic?",
             "I couldn't find any relevant information about this topic. Is there something else I can help you with?",
-            "That topic doesn't appear to be covered in the documentation I have access to.",
         ],
         "partial": [
             "I found some related information, but nothing that directly answers your question. Would you like me to share what I found?",
         ],
         "suggest_rephrase": [
             "I couldn't find a match for your query. Could you try rephrasing it or being more specific?",
-            "No results found. Perhaps try using different keywords?",
         ],
     }
 
@@ -235,13 +521,6 @@ class NotFoundResponseGenerator:
 class ResponseSanitizer:
     """Sanitize responses to remove file references."""
 
-    GENERAL_KNOWLEDGE_PATTERNS = [
-        r"(?i)\bbased on my (general )?knowledge\b",
-        r"(?i)\bgenerally speaking\b",
-        r"(?i)\bin most cases\b",
-        r"(?i)\bfrom what I know\b",
-    ]
-
     FILE_PATTERNS = [
         r"\b[\w\-]+\.(pdf|docx?|txt|xlsx?|pptx?|csv|json|xml)\b",
         r"\(source:\s*[^)]+\)",
@@ -251,7 +530,12 @@ class ResponseSanitizer:
 
     @classmethod
     def contains_general_knowledge(cls, response: str) -> bool:
-        for pattern in cls.GENERAL_KNOWLEDGE_PATTERNS:
+        patterns = [
+            r"(?i)\bbased on my (general )?knowledge\b",
+            r"(?i)\bgenerally speaking\b",
+            r"(?i)\bin most cases\b",
+        ]
+        for pattern in patterns:
             if re.search(pattern, response):
                 return True
         return False
@@ -270,57 +554,24 @@ class ResponseSanitizer:
         return sanitized.strip()
 
 
-# Add to app/services/rag/analyzers.py
-
-
 class HallucinationDetector:
     """Detect and filter hallucinated content."""
 
-    # Phrases that typically indicate hallucination/general knowledge
     HALLUCINATION_INDICATORS = [
         r"(?i)this could lead to",
         r"(?i)it('s| is) important to",
         r"(?i)generally speaking",
         r"(?i)in most cases",
         r"(?i)typically,",
-        r"(?i)usually,",
         r"(?i)you should (also )?consider",
         r"(?i)to avoid (any )?(potential )?issues",
-        r"(?i)it('s| is) (also )?recommended",
         r"(?i)best practice",
-        r"(?i)keep in mind",
-        r"(?i)be aware that",
-        r"(?i)note that",
-        r"(?i)remember that",
         r"(?i)from (my|general) knowledge",
-        r"(?i)based on (my|general) (knowledge|understanding)",
-        r"(?i)as a general rule",
-        r"(?i)in general,",
-        r"(?i)commonly,",
-        r"(?i)often,",
-        r"(?i)may (also )?result in",
-        r"(?i)could (also )?cause",
-        r"(?i)might (also )?lead to",
-        r"(?i)to ensure",
-        r"(?i)to prevent",
-        r"(?i)for (your )?safety",
-        r"(?i)as soon as possible",
-        r"(?i)it would be (wise|advisable)",
     ]
 
     @classmethod
     def contains_hallucination(cls, response: str) -> bool:
-        """Check if response contains hallucination indicators."""
         for pattern in cls.HALLUCINATION_INDICATORS:
             if re.search(pattern, response):
                 return True
         return False
-
-    @classmethod
-    def get_hallucination_phrases(cls, response: str) -> list:
-        """Get list of detected hallucination phrases."""
-        found = []
-        for pattern in cls.HALLUCINATION_INDICATORS:
-            matches = re.findall(pattern, response)
-            found.extend(matches)
-        return found

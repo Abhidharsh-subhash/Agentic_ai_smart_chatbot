@@ -14,6 +14,8 @@ from .nodes import (
     validate_search_results,
     handle_not_found,
     save_to_memory,
+    handle_scenario_selection,
+    ask_scenario_clarification,
     should_continue,
     route_after_analysis,
     route_after_validation,
@@ -21,12 +23,12 @@ from .nodes import (
 
 
 def create_rag_graph():
-    """Create and compile the RAG agent graph with CoT and Memory."""
+    """Create and compile the RAG agent graph with scenario handling."""
     workflow = StateGraph(AgentState)
 
     # Add nodes
     workflow.add_node("analyze_input", analyze_input)
-    workflow.add_node("think_and_plan", think_and_plan)  # NEW: CoT node
+    workflow.add_node("think_and_plan", think_and_plan)
     workflow.add_node("handle_greeting", handle_greeting)
     workflow.add_node("handle_closing", handle_closing)
     workflow.add_node("handle_document_listing", handle_document_listing)
@@ -35,12 +37,16 @@ def create_rag_graph():
     workflow.add_node("tools", tool_node)
     workflow.add_node("validate_search", validate_search_results)
     workflow.add_node("handle_not_found", handle_not_found)
-    workflow.add_node("save_memory", save_to_memory)  # NEW: Memory node
+    workflow.add_node("save_memory", save_to_memory)
+
+    # NEW: Scenario handling nodes
+    workflow.add_node("handle_scenario_selection", handle_scenario_selection)
+    workflow.add_node("ask_scenario_clarification", ask_scenario_clarification)
 
     # Entry point
     workflow.add_edge(START, "analyze_input")
 
-    # Route after input analysis
+    # Route after input analysis (updated with scenario selection)
     workflow.add_conditional_edges(
         "analyze_input",
         route_after_analysis,
@@ -49,7 +55,8 @@ def create_rag_graph():
             "handle_closing": "handle_closing",
             "handle_document_listing": "handle_document_listing",
             "ask_clarification": "ask_clarification",
-            "think_and_plan": "think_and_plan",  # Go to CoT
+            "think_and_plan": "think_and_plan",
+            "handle_scenario_selection": "handle_scenario_selection",
         },
     )
 
@@ -62,7 +69,13 @@ def create_rag_graph():
     workflow.add_edge("handle_document_listing", END)
     workflow.add_edge("ask_clarification", END)
     workflow.add_edge("handle_not_found", END)
-    workflow.add_edge("save_memory", END)  # Memory save then END
+    workflow.add_edge("save_memory", END)
+
+    # NEW: Scenario nodes
+    workflow.add_edge(
+        "handle_scenario_selection", "save_memory"
+    )  # Save after scenario response
+    workflow.add_edge("ask_scenario_clarification", END)  # Wait for user response
 
     # Agent -> Tools or Save Memory
     workflow.add_conditional_edges(
@@ -72,11 +85,15 @@ def create_rag_graph():
     # Tools -> Validate Search Results
     workflow.add_edge("tools", "validate_search")
 
-    # Validate -> Handle Not Found or Continue to Agent
+    # Validate -> Handle Not Found, Ask Scenario Clarification, or Continue to Agent
     workflow.add_conditional_edges(
         "validate_search",
         route_after_validation,
-        {"handle_not_found": "handle_not_found", "agent": "agent"},
+        {
+            "handle_not_found": "handle_not_found",
+            "ask_scenario_clarification": "ask_scenario_clarification",
+            "agent": "agent",
+        },
     )
 
     # Compile with memory
