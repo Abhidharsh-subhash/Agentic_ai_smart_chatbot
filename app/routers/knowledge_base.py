@@ -137,6 +137,7 @@ async def delete_folder(
     db: AsyncSession = Depends(get_db),
     current_admin: Admins = Depends(get_current_admin),
 ):
+    # 1. Fetch folder
     result = await db.execute(
         select(Folders).where(
             Folders.id == payload.folder_id,
@@ -148,11 +149,44 @@ async def delete_folder(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Folder does not exist!"
         )
+
+    # 2. Ownership check
     if folder.admin_id != current_admin.id:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You are not authorized to delete the folder.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to delete this folder.",
         )
+
+    # 3. Check for files uploaded by other admin
+    result = await db.execute(
+        select(Files.id)
+        .where(
+            Files.folder_id == folder.id,
+            Files.deleted.is_(False),
+            Files.admin_id.is_not(None),
+            Files.admin_id != current_admin.id,
+        )
+        .limit(1)
+    )
+    foreign_file = result.scalar_one_or_none()
+    if foreign_file:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Folder cannot be deleted because it contains files"
+            "uploaded by other admins.",
+        )
+
+    # 4. Fetch all files in the folder to delete the embeddings
+    result = await db.execute(
+        select(Files).where(Files.folder_id == folder.id, Files.deleted.is_(False))
+    )
+    files = result.scalars().all()
+    deleted_file_ids = []
+    for file in files:
+        file.deleted = True
+        deleted_file_ids.append(file.id)
+
+    # 5. Soft-delete folder
     folder.deleted = True
     try:
         await db.commit()
@@ -161,6 +195,12 @@ async def delete_folder(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to delete the file. Try again!",
+        )
+    if deleted_file_ids:
+        from app.tasks.embedding_tasks import delete_files_embeddings_task
+
+        delete_files_embeddings_task.delay(
+            file_ids=deleted_file_ids,
         )
     return {
         "status_code": status.HTTP_204_NO_CONTENT,
