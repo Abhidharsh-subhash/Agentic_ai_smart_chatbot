@@ -26,9 +26,14 @@ class Config:
     MAX_CLARIFICATION_ATTEMPTS = 3
     MAX_CHARS_FOR_DIRECT_ANSWER = 450
 
-    # NEW: LLM-based scenario detection
-    USE_LLM_SCENARIO_DETECTION = True
-    SCENARIO_DETECTION_THRESHOLD = 0.6
+    # Strict mode - ONLY document content, no external knowledge
+    STRICT_DOCUMENT_MODE = True
+
+    # Always ask clarification for multiple scenarios (consistent behavior)
+    ALWAYS_CLARIFY_MULTIPLE_SCENARIOS = True
+
+    # Ignore conversation history for scenario detection
+    FRESH_SCENARIO_DETECTION = True
 
 
 class SearchQuality(str, Enum):
@@ -50,8 +55,6 @@ class InteractionMode(str, Enum):
 
 
 class SupportMode(str, Enum):
-    """Support agent response modes."""
-
     DIRECT_ANSWER = "direct_answer"
     NEED_CLARIFICATION = "need_clarification"
     SCENARIO_SELECTION = "scenario_selection"

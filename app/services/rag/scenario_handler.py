@@ -1,16 +1,16 @@
 """
-Scenario Handler - Manages dynamic scenario detection and clarification.
-Uses LLM to analyze search results for multiple answer paths.
+Scenario Handler - Consistent detection regardless of conversation history.
 """
 
 import json
 import re
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
+from .config import Config
 
 
 @dataclass
@@ -47,549 +47,335 @@ class ScenarioAnalysisResult:
 
 class ScenarioHandler:
     """
-    Handles dynamic scenario detection and clarification using LLM.
-    Supports both sync and async operations.
+    Handles scenario detection consistently.
+    Always detects scenarios the same way regardless of conversation history.
     """
 
-    SCENARIO_ANALYSIS_PROMPT = """Analyze the following search results for a user query and determine if there are multiple scenarios, options, or conditions that require clarification.
+    # Deterministic prompt - no conversation context to ensure consistency
+    SCENARIO_DETECTION_PROMPT = """Analyze these search results and determine if there are MULTIPLE DISTINCT SCENARIOS that require different answers.
 
-## USER QUERY:
+## USER QUESTION:
 {query}
 
 ## SEARCH RESULTS:
 {search_results}
 
-## ANALYSIS TASK:
-1. Determine if the answer varies based on different conditions, user types, or scenarios
-2. If YES: Extract each distinct scenario with its condition and relevant answer
-3. If NO: The answer is direct and applies to all cases
+## ANALYSIS RULES:
+1. Look for DISTINCT scenarios/conditions (e.g., "If you are X..." vs "If you are Y...")
+2. Each scenario should have a DIFFERENT solution/answer
+3. Ignore minor variations - only count truly different paths
+4. Be CONSISTENT - the same content should always produce the same result
 
-## RESPOND WITH ONLY THIS JSON (no markdown, no extra text):
+## SCENARIO INDICATORS TO LOOK FOR:
+- "If you are/have..." patterns
+- "Scenario 1:", "Scenario 2:" labels
+- "For [type] users..." patterns
+- "Option A:", "Option B:" patterns
+- "In case of..." patterns
+
+## RESPOND WITH ONLY THIS JSON:
 {{
     "has_multiple_scenarios": true/false,
-    "confidence": 0.0-1.0,
-    "reasoning": "brief explanation of why",
+    "scenario_count": 0,
     "scenarios": [
         {{
             "id": "1",
-            "title": "short title",
+            "title": "brief title",
             "condition": "when this applies",
-            "description": "the answer for this scenario",
-            "keywords": ["keyword1", "keyword2"]
+            "description": "what to do in this scenario"
         }}
     ],
-    "direct_answer": "if has_multiple_scenarios is false, provide the direct answer here",
-    "clarification_question": "if has_multiple_scenarios is true, generate a natural question asking user which scenario applies"
+    "reasoning": "why I detected these scenarios"
 }}
 
-## EXAMPLES OF MULTIPLE SCENARIOS:
-- "If you are an admin..." vs "If you are a regular user..."
-- "For new customers..." vs "For existing customers..."
-- "Option A: ..." vs "Option B: ..."
-- Different steps based on device type, account type, etc.
-
-## EXAMPLES OF DIRECT ANSWERS:
-- Simple facts: "The fee is $50"
-- Single process: "To reset password, click forgot password..."
-- Definitions: "A widget is..."
-
-Be conservative - only flag as multiple scenarios if the answer truly differs based on user situation."""
-
-    CLARIFICATION_GENERATION_PROMPT = """Generate a friendly, natural clarification question for the user.
-
-USER'S ORIGINAL QUESTION: {query}
-
-DETECTED SCENARIOS:
-{scenarios}
-
-Generate a question that:
-1. Acknowledges what the user asked
-2. Explains you found information for different situations
-3. Lists the options clearly with numbers
-4. Asks them to choose or describe their situation
-
-Keep it conversational and helpful. Don't be robotic.
-
-RESPOND WITH ONLY THE CLARIFICATION QUESTION TEXT (no JSON, no quotes):"""
-
-    SCENARIO_EXTRACTION_PROMPT = """Extract the specific answer for the selected scenario.
-
-ORIGINAL QUESTION: {query}
-
-USER SELECTED: {selection}
-
-ALL SCENARIOS:
-{scenarios}
-
-RELEVANT DOCUMENTS:
-{documents}
-
-Provide ONLY the answer relevant to the selected scenario.
-Be specific and detailed.
-Use only information from the documents.
-
-RESPONSE:"""
+IMPORTANT: Be deterministic. The same input should ALWAYS produce the same output."""
 
     def __init__(self):
         self._llm = None
 
     @property
     def llm(self):
-        """Lazy initialization of LLM."""
         if self._llm is None:
             self._llm = ChatOpenAI(
                 model=getattr(settings, "openai_model", "gpt-4o"),
-                temperature=0.0,
+                temperature=0.0,  # Deterministic - crucial for consistency
                 openai_api_key=settings.openai_api_key,
             )
         return self._llm
 
     def analyze_for_scenarios_sync(
-        self, query: str, search_results: List[Dict], use_llm: bool = True
+        self, query: str, search_results: List[Dict], session_id: str = ""
     ) -> ScenarioAnalysisResult:
         """
-        Synchronous version: Analyze search results to detect if multiple scenarios exist.
-
-        Args:
-            query: User's question
-            search_results: List of document dicts with 'content' key
-            use_llm: Whether to use LLM analysis (more accurate but slower)
+        Analyze search results for multiple scenarios.
+        This is STATELESS - does not consider conversation history.
         """
-        if not search_results:
-            return ScenarioAnalysisResult(
-                has_multiple_scenarios=False,
-                scenarios=[],
-                clarification_question=None,
-                direct_answer=None,
-                confidence=0.0,
-                reasoning="No search results",
-            )
+        print(f"\n[ScenarioHandler] === FRESH ANALYSIS (no history) ===")
+        print(f"[ScenarioHandler] Query: {query}")
+        print(f"[ScenarioHandler] Documents: {len(search_results)}")
 
-        # Combine search results
+        if not search_results:
+            return self._empty_result("No search results")
+
+        # Combine document content
         combined_content = "\n\n---\n\n".join(
             [doc.get("content", "") for doc in search_results[:5]]
         )
 
-        # Quick heuristic check first
-        quick_check = self._quick_scenario_check(combined_content, query)
+        # Step 1: Quick regex check for scenarios
+        regex_scenarios = self._regex_scenario_detection(combined_content)
+        print(f"[ScenarioHandler] Regex found {len(regex_scenarios)} scenarios")
 
-        if not quick_check["might_have_scenarios"]:
-            # Likely direct answer - skip LLM analysis
-            return ScenarioAnalysisResult(
-                has_multiple_scenarios=False,
-                scenarios=[],
-                clarification_question=None,
-                direct_answer=combined_content[:1000],
-                confidence=0.9,
-                reasoning="Quick check: appears to be direct answer",
-            )
+        # Step 2: If regex finds scenarios, use LLM to validate and structure
+        if len(regex_scenarios) >= Config.MIN_SCENARIOS_FOR_CLARIFICATION:
+            return self._llm_analysis(query, combined_content, session_id)
 
-        if use_llm:
-            return self._llm_scenario_analysis_sync(query, combined_content)
-        else:
-            return self._regex_scenario_analysis(query, combined_content)
+        # Step 3: If regex finds nothing, still do LLM check for edge cases
+        if self._might_have_scenarios(combined_content):
+            return self._llm_analysis(query, combined_content, session_id)
 
-    async def analyze_for_scenarios(
-        self, query: str, search_results: List[Dict], use_llm: bool = True
-    ) -> ScenarioAnalysisResult:
-        """
-        Async version: Analyze search results to detect if multiple scenarios exist.
-        """
-        if not search_results:
-            return ScenarioAnalysisResult(
-                has_multiple_scenarios=False,
-                scenarios=[],
-                clarification_question=None,
-                direct_answer=None,
-                confidence=0.0,
-                reasoning="No search results",
-            )
-
-        combined_content = "\n\n---\n\n".join(
-            [doc.get("content", "") for doc in search_results[:5]]
-        )
-
-        quick_check = self._quick_scenario_check(combined_content, query)
-
-        if not quick_check["might_have_scenarios"]:
-            return ScenarioAnalysisResult(
-                has_multiple_scenarios=False,
-                scenarios=[],
-                clarification_question=None,
-                direct_answer=combined_content[:1000],
-                confidence=0.9,
-                reasoning="Quick check: appears to be direct answer",
-            )
-
-        if use_llm:
-            return await self._llm_scenario_analysis_async(query, combined_content)
-        else:
-            return self._regex_scenario_analysis(query, combined_content)
-
-    def _quick_scenario_check(self, content: str, query: str) -> Dict:
-        """Quick heuristic check before LLM analysis."""
-        content_lower = content.lower()
-        query_lower = query.lower()
-
-        # Indicators of potential multiple scenarios
-        scenario_indicators = [
-            r"\bif you (are|have|want|need)\b",
-            r"\b(option|scenario|case|situation)\s*[1-9a-c]\b",
-            r"\bfor (new|existing|individual|business|admin|regular)\b",
-            r"\b(either|alternatively|or you can)\b",
-            r"\bdepending on\b",
-            r"\bbased on (your|the)\b",
-            r"\b(method|approach|way)\s*[1-9]\b",
-            r"•\s*(if|when|for)\b",
-        ]
-
-        indicator_count = sum(
-            1 for pattern in scenario_indicators if re.search(pattern, content_lower)
-        )
-
-        is_short = len(content) < 400
-
-        is_factual_query = any(
-            query_lower.startswith(p)
-            for p in [
-                "what is",
-                "what are",
-                "how much",
-                "when is",
-                "where is",
-                "who is",
-            ]
-        )
-
-        might_have_scenarios = indicator_count >= 2 and not (
-            is_short and is_factual_query
-        )
-
-        return {
-            "might_have_scenarios": might_have_scenarios,
-            "indicator_count": indicator_count,
-            "is_short": is_short,
-            "is_factual_query": is_factual_query,
-        }
-
-    def _llm_scenario_analysis_sync(
-        self, query: str, content: str
-    ) -> ScenarioAnalysisResult:
-        """Synchronous LLM analysis for scenarios."""
-        prompt = self.SCENARIO_ANALYSIS_PROMPT.format(
-            query=query, search_results=content[:4000]
-        )
-
-        try:
-            # Use sync invoke
-            response = self.llm.invoke([SystemMessage(content=prompt)])
-            result = self._parse_scenario_response(response.content)
-
-            return self._build_analysis_result(result)
-        except Exception as e:
-            print(f"LLM scenario analysis error: {e}")
-            return self._regex_scenario_analysis(query, content)
-
-    async def _llm_scenario_analysis_async(
-        self, query: str, content: str
-    ) -> ScenarioAnalysisResult:
-        """Async LLM analysis for scenarios."""
-        prompt = self.SCENARIO_ANALYSIS_PROMPT.format(
-            query=query, search_results=content[:4000]
-        )
-
-        try:
-            response = await self.llm.ainvoke([SystemMessage(content=prompt)])
-            result = self._parse_scenario_response(response.content)
-
-            return self._build_analysis_result(result)
-        except Exception as e:
-            print(f"LLM scenario analysis error: {e}")
-            return self._regex_scenario_analysis(query, content)
-
-    def _build_analysis_result(self, result: Dict) -> ScenarioAnalysisResult:
-        """Build ScenarioAnalysisResult from parsed response."""
+        # Direct answer - no scenarios
+        print(f"[ScenarioHandler] No scenarios detected, returning direct answer")
         return ScenarioAnalysisResult(
-            has_multiple_scenarios=result.get("has_multiple_scenarios", False),
-            scenarios=[
-                DetectedScenario(
-                    id=s.get("id", str(i + 1)),
-                    title=s.get("title", f"Option {i+1}"),
-                    condition=s.get("condition", ""),
-                    description=s.get("description", ""),
-                    keywords=s.get("keywords", []),
-                )
-                for i, s in enumerate(result.get("scenarios", []))
-            ],
-            clarification_question=result.get("clarification_question"),
-            direct_answer=result.get("direct_answer"),
-            confidence=result.get("confidence", 0.5),
-            reasoning=result.get("reasoning", ""),
+            has_multiple_scenarios=False,
+            scenarios=[],
+            clarification_question=None,
+            direct_answer=combined_content[:1000],
+            confidence=0.9,
+            reasoning="No multiple scenarios detected",
         )
 
-    def _regex_scenario_analysis(
-        self, query: str, content: str
-    ) -> ScenarioAnalysisResult:
-        """Fallback regex-based scenario detection."""
+    def _regex_scenario_detection(self, content: str) -> List[Dict]:
+        """Deterministic regex-based scenario detection."""
         scenarios = []
 
-        patterns = [
-            (r"(?:Option|Scenario|Case)\s*(\d+)[:\s]+([^.]+\.)", "numbered"),
-            (r"If you (are|have|want)\s+([^,.:]+)[,:]?\s*([^.]+\.)", "conditional"),
-            (
-                r"For (new|existing|admin|regular)\s+([^,.:]+)[,:]?\s*([^.]+\.)",
-                "user_type",
-            ),
+        # Pattern 1: "Scenario X:" format
+        scenario_pattern = r"Scenario\s*(\d+)\s*[:\-]\s*([^\n]+)"
+        for match in re.finditer(scenario_pattern, content, re.IGNORECASE):
+            scenarios.append(
+                {
+                    "id": match.group(1),
+                    "title": f"Scenario {match.group(1)}",
+                    "condition": match.group(2).strip(),
+                    "description": match.group(0),
+                }
+            )
+
+        # Pattern 2: "If you are/have..." format
+        if_pattern = (
+            r"[Ii]f\s+(?:you\s+)?(are|have|want|need)\s+([^,.:]+)[,.:]\s*([^.]+\.?)"
+        )
+        for i, match in enumerate(re.finditer(if_pattern, content)):
+            scenarios.append(
+                {
+                    "id": str(len(scenarios) + 1),
+                    "title": f"Condition {len(scenarios) + 1}",
+                    "condition": f"If you {match.group(1)} {match.group(2)}".strip(),
+                    "description": match.group(3).strip()[:200],
+                }
+            )
+
+        # Pattern 3: "Option/Case X:" format
+        option_pattern = r"(?:Option|Case|Method)\s*(\d+|[A-C])\s*[:\-]\s*([^\n]+)"
+        for match in re.finditer(option_pattern, content, re.IGNORECASE):
+            scenarios.append(
+                {
+                    "id": str(len(scenarios) + 1),
+                    "title": f"Option {match.group(1)}",
+                    "condition": match.group(2).strip(),
+                    "description": match.group(0),
+                }
+            )
+
+        # Deduplicate
+        seen = set()
+        unique = []
+        for s in scenarios:
+            key = s["condition"].lower()[:50]
+            if key not in seen:
+                seen.add(key)
+                unique.append(s)
+
+        return unique
+
+    def _might_have_scenarios(self, content: str) -> bool:
+        """Quick check if content might have scenarios."""
+        indicators = [
+            r"\bscenario\s*\d",
+            r"\boption\s*\d",
+            r"\bcase\s*\d",
+            r"\bif you (are|have|want|need)\b",
+            r"\bdepending on\b",
+            r"\bbased on your\b",
         ]
 
-        scenario_id = 1
-        for pattern, ptype in patterns:
-            for match in re.finditer(pattern, content, re.IGNORECASE):
-                groups = match.groups()
-                scenarios.append(
-                    DetectedScenario(
-                        id=str(scenario_id),
-                        title=f"{ptype.title()} {scenario_id}",
-                        condition=" ".join(g for g in groups[:2] if g),
-                        description=match.group(0)[:200],
-                        keywords=[],
-                    )
+        content_lower = content.lower()
+        matches = sum(1 for p in indicators if re.search(p, content_lower))
+
+        return matches >= 2
+
+    def _llm_analysis(
+        self, query: str, content: str, session_id: str = ""
+    ) -> ScenarioAnalysisResult:
+        """LLM-based scenario analysis - deterministic."""
+        print(f"[ScenarioHandler] Running LLM analysis...")
+
+        prompt = self.SCENARIO_DETECTION_PROMPT.format(
+            query=query, search_results=content[:4000]
+        )
+
+        try:
+            response = self.llm.invoke([SystemMessage(content=prompt)])
+            result = self._parse_response(response.content)
+
+            scenarios = [
+                DetectedScenario(
+                    id=s.get("id", str(i + 1)),
+                    title=s.get("title", f"Scenario {i+1}"),
+                    condition=s.get("condition", ""),
+                    description=s.get("description", ""),
+                    keywords=[],
                 )
-                scenario_id += 1
+                for i, s in enumerate(result.get("scenarios", []))
+            ]
 
-        unique_scenarios = self._deduplicate_scenarios(scenarios)
-        has_multiple = len(unique_scenarios) >= 2
+            has_multiple = len(scenarios) >= Config.MIN_SCENARIOS_FOR_CLARIFICATION
 
-        clarification_question = None
+            print(f"[ScenarioHandler] LLM detected {len(scenarios)} scenarios")
+            print(f"[ScenarioHandler] Has multiple: {has_multiple}")
+
+            clarification = None
+            if has_multiple:
+                clarification = self._generate_clarification(query, scenarios)
+
+            return ScenarioAnalysisResult(
+                has_multiple_scenarios=has_multiple,
+                scenarios=scenarios,
+                clarification_question=clarification,
+                direct_answer=None if has_multiple else content[:1000],
+                confidence=result.get("confidence", 0.8),
+                reasoning=result.get("reasoning", "LLM analysis"),
+            )
+
+        except Exception as e:
+            print(f"[ScenarioHandler] LLM error: {e}")
+            # Fallback to regex-only
+            regex_scenarios = self._regex_scenario_detection(content)
+            return self._build_from_regex(query, content, regex_scenarios)
+
+    def _generate_clarification(
+        self, query: str, scenarios: List[DetectedScenario]
+    ) -> str:
+        """Generate clarification question."""
+        options = "\n".join(
+            [f"{i+1}. {s.condition or s.title}" for i, s in enumerate(scenarios[:5])]
+        )
+
+        return (
+            f"I found different solutions depending on your specific situation. "
+            f"Which of these applies to you?\n\n{options}\n\n"
+            f"Please reply with a number or describe your situation."
+        )
+
+    def _build_from_regex(
+        self, query: str, content: str, regex_scenarios: List[Dict]
+    ) -> ScenarioAnalysisResult:
+        """Build result from regex detection."""
+        scenarios = [
+            DetectedScenario(
+                id=s.get("id", str(i + 1)),
+                title=s.get("title", f"Scenario {i+1}"),
+                condition=s.get("condition", ""),
+                description=s.get("description", ""),
+                keywords=[],
+            )
+            for i, s in enumerate(regex_scenarios)
+        ]
+
+        has_multiple = len(scenarios) >= Config.MIN_SCENARIOS_FOR_CLARIFICATION
+
+        clarification = None
         if has_multiple:
-            options = "\n".join(
-                [
-                    f"{i+1}. {s.condition or s.title}"
-                    for i, s in enumerate(unique_scenarios[:5])
-                ]
-            )
-            clarification_question = (
-                f"I found different information depending on your situation. "
-                f"Which of these applies to you?\n\n{options}\n\n"
-                f"Please reply with the number or describe your situation."
-            )
+            clarification = self._generate_clarification(query, scenarios)
 
         return ScenarioAnalysisResult(
             has_multiple_scenarios=has_multiple,
-            scenarios=unique_scenarios[:5],
-            clarification_question=clarification_question,
-            direct_answer=None if has_multiple else content[:500],
-            confidence=0.6 if has_multiple else 0.8,
-            reasoning="Regex pattern matching",
+            scenarios=scenarios,
+            clarification_question=clarification,
+            direct_answer=None if has_multiple else content[:1000],
+            confidence=0.7,
+            reasoning="Regex-based detection",
         )
 
-    def _deduplicate_scenarios(
-        self, scenarios: List[DetectedScenario]
-    ) -> List[DetectedScenario]:
-        """Remove duplicate/similar scenarios."""
-        unique = []
-        for s in scenarios:
-            is_dup = False
-            for existing in unique:
-                s_words = set(s.condition.lower().split())
-                e_words = set(existing.condition.lower().split())
-                if len(s_words) > 0 and len(s_words & e_words) / len(s_words) > 0.7:
-                    is_dup = True
-                    break
-            if not is_dup:
-                unique.append(s)
-        return unique
-
-    def _parse_scenario_response(self, response: str) -> Dict:
-        """Parse LLM response to extract scenario information."""
+    def _parse_response(self, response: str) -> Dict:
+        """Parse LLM response."""
         try:
             return json.loads(response.strip())
         except json.JSONDecodeError:
             pass
 
-        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", response)
-        if json_match:
+        # Try code block
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", response)
+        if match:
             try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
+                return json.loads(match.group(1))
+            except:
                 pass
 
-        brace_match = re.search(r"\{[\s\S]*\}", response)
-        if brace_match:
+        # Try brace match
+        match = re.search(r"\{[\s\S]*\}", response)
+        if match:
             try:
-                return json.loads(brace_match.group(0))
-            except json.JSONDecodeError:
+                return json.loads(match.group(0))
+            except:
                 pass
 
-        return {
-            "has_multiple_scenarios": False,
-            "scenarios": [],
-            "direct_answer": response[:500],
-            "confidence": 0.5,
-            "reasoning": "Could not parse LLM response",
-        }
+        return {"has_multiple_scenarios": False, "scenarios": []}
 
-    def generate_clarification_question_sync(
-        self, query: str, scenarios: List[DetectedScenario]
-    ) -> str:
-        """Synchronous: Generate a natural clarification question."""
-        if not scenarios:
-            return "Could you provide more details about your specific situation?"
-
-        scenarios_text = "\n".join(
-            [f"{s.id}. {s.title}: {s.condition}" for s in scenarios[:5]]
+    def _empty_result(self, reason: str) -> ScenarioAnalysisResult:
+        """Return empty result."""
+        return ScenarioAnalysisResult(
+            has_multiple_scenarios=False,
+            scenarios=[],
+            clarification_question=None,
+            direct_answer=None,
+            confidence=0.0,
+            reasoning=reason,
         )
-
-        prompt = self.CLARIFICATION_GENERATION_PROMPT.format(
-            query=query, scenarios=scenarios_text
-        )
-
-        try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            return response.content.strip()
-        except Exception as e:
-            print(f"Error generating clarification: {e}")
-            return self._fallback_clarification_question(scenarios)
-
-    async def generate_clarification_question(
-        self, query: str, scenarios: List[DetectedScenario]
-    ) -> str:
-        """Async: Generate a natural clarification question."""
-        if not scenarios:
-            return "Could you provide more details about your specific situation?"
-
-        scenarios_text = "\n".join(
-            [f"{s.id}. {s.title}: {s.condition}" for s in scenarios[:5]]
-        )
-
-        prompt = self.CLARIFICATION_GENERATION_PROMPT.format(
-            query=query, scenarios=scenarios_text
-        )
-
-        try:
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            return response.content.strip()
-        except Exception as e:
-            print(f"Error generating clarification: {e}")
-            return self._fallback_clarification_question(scenarios)
-
-    def _fallback_clarification_question(
-        self, scenarios: List[DetectedScenario]
-    ) -> str:
-        """Generate fallback clarification question."""
-        options = "\n".join(
-            [f"{s.id}. {s.condition or s.title}" for s in scenarios[:5]]
-        )
-        return (
-            f"I found information for different situations. "
-            f"Which applies to you?\n\n{options}\n\n"
-            f"Reply with a number or describe your case."
-        )
-
-    def extract_scenario_answer_sync(
-        self, query: str, selection: str, scenarios: List[Dict], documents: List[Dict]
-    ) -> str:
-        """Synchronous: Extract the specific answer for a selected scenario."""
-        scenarios_text = "\n".join(
-            [
-                f"{s.get('id', i+1)}. {s.get('title', '')}: {s.get('condition', '')} - {s.get('description', '')[:200]}"
-                for i, s in enumerate(scenarios)
-            ]
-        )
-
-        docs_text = "\n\n---\n\n".join([d.get("content", "") for d in documents[:3]])
-
-        prompt = self.SCENARIO_EXTRACTION_PROMPT.format(
-            query=query,
-            selection=selection,
-            scenarios=scenarios_text,
-            documents=docs_text[:3000],
-        )
-
-        try:
-            response = self.llm.invoke([SystemMessage(content=prompt)])
-            return response.content.strip()
-        except Exception as e:
-            print(f"Error extracting scenario answer: {e}")
-            return "I had trouble extracting the specific answer. Could you please rephrase your question?"
-
-    async def extract_scenario_answer(
-        self, query: str, selection: str, scenarios: List[Dict], documents: List[Dict]
-    ) -> str:
-        """Async: Extract the specific answer for a selected scenario."""
-        scenarios_text = "\n".join(
-            [
-                f"{s.get('id', i+1)}. {s.get('title', '')}: {s.get('condition', '')} - {s.get('description', '')[:200]}"
-                for i, s in enumerate(scenarios)
-            ]
-        )
-
-        docs_text = "\n\n---\n\n".join([d.get("content", "") for d in documents[:3]])
-
-        prompt = self.SCENARIO_EXTRACTION_PROMPT.format(
-            query=query,
-            selection=selection,
-            scenarios=scenarios_text,
-            documents=docs_text[:3000],
-        )
-
-        try:
-            response = await self.llm.ainvoke([SystemMessage(content=prompt)])
-            return response.content.strip()
-        except Exception as e:
-            print(f"Error extracting scenario answer: {e}")
-            return "I had trouble extracting the specific answer. Could you please rephrase your question?"
 
     def match_user_response_to_scenario(
         self, response: str, scenarios: List[DetectedScenario]
     ) -> Optional[str]:
-        """Match user's follow-up response to a scenario."""
+        """Match user selection to scenario."""
         response_clean = response.strip().lower()
 
-        # Direct number selection
+        # Direct number
         if response_clean.isdigit():
             num = int(response_clean)
             if 1 <= num <= len(scenarios):
                 return str(num)
 
-        # "Option X" or "Scenario X" patterns
-        num_match = re.search(r"(?:option|scenario|number|#)\s*(\d+)", response_clean)
-        if num_match:
-            num = int(num_match.group(1))
+        # "Option X" pattern
+        match = re.search(r"(?:option|scenario|number|#)\s*(\d+)", response_clean)
+        if match:
+            num = int(match.group(1))
             if 1 <= num <= len(scenarios):
                 return str(num)
 
         # Word numbers
-        word_to_num = {
-            "first": "1",
-            "second": "2",
-            "third": "3",
-            "fourth": "4",
-            "fifth": "5",
-            "one": "1",
-            "two": "2",
-            "three": "3",
-            "four": "4",
-            "five": "5",
-        }
-        for word, num in word_to_num.items():
-            if word in response_clean:
-                if int(num) <= len(scenarios):
-                    return num
+        words = {"first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5"}
+        for word, num in words.items():
+            if word in response_clean and int(num) <= len(scenarios):
+                return num
 
-        # Try keyword matching
+        # Keyword matching
+        response_words = set(response_clean.split())
         best_match = None
         best_score = 0
-        response_words = set(response_clean.split())
 
         for i, scenario in enumerate(scenarios):
-            keywords = set(k.lower() for k in scenario.keywords)
-            condition_words = set(scenario.condition.lower().split())
-            title_words = set(scenario.title.lower().split())
-
-            all_scenario_words = keywords | condition_words | title_words
-            overlap = len(response_words & all_scenario_words)
-
+            scenario_words = set(scenario.condition.lower().split())
+            overlap = len(response_words & scenario_words)
             if overlap > best_score and overlap >= 2:
                 best_score = overlap
                 best_match = str(i + 1)
@@ -597,5 +383,5 @@ RESPONSE:"""
         return best_match
 
 
-# Singleton instance
+# Singleton
 scenario_handler = ScenarioHandler()
