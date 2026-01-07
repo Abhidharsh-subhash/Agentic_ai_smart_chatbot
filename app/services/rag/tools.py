@@ -2,14 +2,16 @@ import json
 from langchain_core.tools import tool
 from app.services.embeddings import embedding_service
 from .config import Config, SearchQuality
-from .analyzers import SearchResultAnalyzer, ScenarioDetector
+from .analyzers import SearchResultAnalyzer
 
 
 @tool
 def search_documents(query: str, num_results: int = 10) -> str:
     """
     Search the document database for relevant information.
-    Returns search results with quality analysis and scenario detection.
+    Returns search results with quality analysis.
+
+    Note: Scenario detection is handled separately after this returns.
     """
     if not embedding_service.index_file.exists():
         return json.dumps(
@@ -20,8 +22,6 @@ def search_documents(query: str, num_results: int = 10) -> str:
                 "documents": [],
                 "message": "No knowledge base available",
                 "should_respond": False,
-                "has_multiple_scenarios": False,
-                "scenarios": [],
             }
         )
 
@@ -36,7 +36,6 @@ def search_documents(query: str, num_results: int = 10) -> str:
                 "confidence": 0.0,
                 "documents": [],
                 "should_respond": False,
-                "has_multiple_scenarios": False,
             }
         )
 
@@ -47,9 +46,8 @@ def search_documents(query: str, num_results: int = 10) -> str:
                 "quality": SearchQuality.NOT_FOUND.value,
                 "confidence": 0.0,
                 "documents": [],
-                "message": "No results found for this query",
+                "message": "No results found",
                 "should_respond": False,
-                "has_multiple_scenarios": False,
             }
         )
 
@@ -72,10 +70,6 @@ def search_documents(query: str, num_results: int = 10) -> str:
                     }
                 )
 
-    # NEW: Detect scenarios in the documents
-    scenario_detection = ScenarioDetector.detect_scenarios(documents, query)
-
-    # Build response
     response = {
         "found_answer": analysis["found_relevant_info"],
         "should_respond": analysis["should_respond"],
@@ -85,52 +79,17 @@ def search_documents(query: str, num_results: int = 10) -> str:
         "documents": documents,
         "count": len(documents),
         "reason": analysis["reason"],
-        # NEW: Scenario information
-        "has_multiple_scenarios": scenario_detection["has_multiple_scenarios"],
-        "scenarios": scenario_detection["scenarios"],
-        "clarification_question": scenario_detection.get("clarification_question"),
-        "scenario_confidence": scenario_detection.get("confidence", 0.0),
+        # Scenario detection will be done in validate_search node
+        "needs_scenario_analysis": len(documents) > 0,
     }
 
-    # Add instruction based on scenarios
-    if scenario_detection["has_multiple_scenarios"]:
+    if documents:
         response["instruction"] = (
-            "MULTIPLE SCENARIOS DETECTED: Ask the user to clarify which situation applies to them "
-            "before providing a specific answer. Use the clarification_question provided."
-        )
-    elif documents:
-        response["instruction"] = (
-            "Use ONLY the content from these documents to answer. "
-            "Do NOT add any external information."
+            "Use ONLY the content from these documents. "
+            "Scenario analysis will determine if clarification is needed."
         )
 
     return json.dumps(response)
-
-
-@tool
-def get_scenario_specific_answer(scenario_id: str, documents: str) -> str:
-    """
-    Extract answer for a specific scenario from the documents.
-
-    Args:
-        scenario_id: The ID of the scenario selected by the user
-        documents: JSON string of the original documents
-    """
-    try:
-        docs = json.loads(documents) if isinstance(documents, str) else documents
-    except:
-        return json.dumps({"success": False, "error": "Could not parse documents"})
-
-    # This would typically use an LLM to extract scenario-specific content
-    # For now, return the documents for the main LLM to process
-    return json.dumps(
-        {
-            "success": True,
-            "scenario_id": scenario_id,
-            "documents": docs,
-            "instruction": f"Extract and provide ONLY the information relevant to scenario {scenario_id}.",
-        }
-    )
 
 
 @tool
@@ -155,4 +114,4 @@ def get_available_topics() -> str:
 
 
 # Export tools list
-tools = [search_documents, get_scenario_specific_answer, get_available_topics]
+tools = [search_documents, get_available_topics]

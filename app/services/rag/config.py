@@ -13,8 +13,6 @@ class Config:
     EXCELLENT_SCORE = 0.6
     GOOD_SCORE = 0.85
     ACCEPTABLE_SCORE = 1.2
-
-    # If best score is above this, consider it "not found"
     NOT_FOUND_SCORE_THRESHOLD = 1.5
 
     # Minimum number of relevant results needed
@@ -26,11 +24,11 @@ class Config:
     # Scenario detection settings
     MIN_SCENARIOS_FOR_CLARIFICATION = 2
     MAX_CLARIFICATION_ATTEMPTS = 3
-
-    # NEW: Thresholds for skipping clarification
-    # If the total relevant content is shorter than this (characters),
-    # just show it as a direct answer instead of asking clarifying questions.
     MAX_CHARS_FOR_DIRECT_ANSWER = 450
+
+    # NEW: LLM-based scenario detection
+    USE_LLM_SCENARIO_DETECTION = True
+    SCENARIO_DETECTION_THRESHOLD = 0.6
 
 
 class SearchQuality(str, Enum):
@@ -47,7 +45,8 @@ class InteractionMode(str, Enum):
     CLARIFICATION = "clarification"
     NOT_FOUND = "not_found"
     CLOSING = "closing"
-    SCENARIO_SELECTION = "scenario_selection"  # NEW
+    SCENARIO_SELECTION = "scenario_selection"
+    AWAITING_SCENARIO = "awaiting_scenario"
 
 
 class SupportMode(str, Enum):
@@ -57,3 +56,4 @@ class SupportMode(str, Enum):
     NEED_CLARIFICATION = "need_clarification"
     SCENARIO_SELECTION = "scenario_selection"
     FOLLOW_UP = "follow_up"
+    SCENARIO_RESPONSE = "scenario_response"
