@@ -145,10 +145,19 @@ Be helpful and direct."""
 # Tool node
 tool_node = ToolNode(tools)
 
+MAX_CLARIFICATION_ATTEMPTS = 4  # Maximum follow-up questions before giving up
+
 
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
+
+
+def get_response_analyzer():
+    """Get or create the response scenario analyzer."""
+    from .analyzers import ResponseScenarioAnalyzer
+
+    return ResponseScenarioAnalyzer(llm=analyzer_llm)
 
 
 def extract_json_from_response(response_text: str) -> dict:
@@ -232,28 +241,32 @@ def analyze_input(state: AgentState) -> dict:
             "interaction_mode": InteractionMode.QUERY.value,
         }
 
-    # Get memory for this session
     memory = memory_manager.get_or_create(session_id)
 
-    # Check if this is a scenario clarification response
-    is_scenario_clarification = state.get("awaiting_scenario_selection", False)
-
-    if is_scenario_clarification:
-        # User is responding to a scenario clarification question
+    # Check if we're in active clarification flow
+    clarification_state = state.get("clarification_state")
+    if clarification_state and clarification_state.get("is_active", False):
         return {
             "interaction_mode": InteractionMode.QUERY.value,
             "clarification_needed": False,
             "is_follow_up_question": True,
             "user_scenario_context": user_message,
-            "scenario_clarification_pending": True,  # Flag to route to scenario matching
-            "last_user_query": state.get("original_query", ""),
-            "last_assistant_response": state.get("original_full_response", ""),
+            "scenario_clarification_pending": True,
+            "last_user_query": clarification_state.get("original_question", ""),
         }
 
-    # Check if this is a follow-up question
-    is_follow_up = memory.is_likely_follow_up(user_message)
+    # Check if awaiting scenario selection (backwards compatibility)
+    if state.get("awaiting_scenario_selection", False):
+        return {
+            "interaction_mode": InteractionMode.QUERY.value,
+            "clarification_needed": False,
+            "is_follow_up_question": True,
+            "user_scenario_context": user_message,
+            "scenario_clarification_pending": True,
+            "last_user_query": state.get("original_query", ""),
+        }
 
-    # Store current query info
+    is_follow_up = memory.is_likely_follow_up(user_message)
     last_user = memory.get_last_user_query()
     last_assistant = memory.get_last_assistant_response()
 
@@ -264,6 +277,7 @@ def analyze_input(state: AgentState) -> dict:
             "clarification_needed": False,
             "is_follow_up_question": False,
             "awaiting_scenario_selection": False,
+            "clarification_state": None,
         }
 
     # Check for closings
@@ -273,10 +287,11 @@ def analyze_input(state: AgentState) -> dict:
             "clarification_needed": False,
             "is_follow_up_question": False,
             "awaiting_scenario_selection": False,
+            "clarification_state": None,
         }
 
-    # Handle pending clarification (from vague query, not scenarios)
-    if state.get("pending_clarification", False) and not is_scenario_clarification:
+    # Handle pending clarification (vague query)
+    if state.get("pending_clarification", False):
         return {
             "clarification_needed": False,
             "pending_clarification": False,
@@ -296,7 +311,7 @@ def analyze_input(state: AgentState) -> dict:
         "clarification_reason": analysis.get("clarification_type", ""),
         "follow_up_questions": analysis.get("follow_up_questions", []),
         "pending_clarification": needs_clarification,
-        "original_query": user_message if needs_clarification else user_message,
+        "original_query": user_message,
         "search_confidence": analysis["confidence"],
         "interaction_mode": (
             InteractionMode.CLARIFICATION.value
@@ -308,6 +323,7 @@ def analyze_input(state: AgentState) -> dict:
         "last_assistant_response": last_assistant or "",
         "awaiting_scenario_selection": False,
         "scenario_clarification_pending": False,
+        "clarification_state": None,
     }
 
 
@@ -626,19 +642,20 @@ def handle_not_found(state: AgentState) -> dict:
 
 def analyze_response_scenarios(state: AgentState) -> dict:
     """
-    NEW NODE: Analyze the agent's response for multiple scenarios.
-    If multiple scenarios detected, prepare clarification flow.
+    Analyze response for multiple scenarios.
+    Initialize multi-turn clarification if needed.
     """
     messages = state["messages"]
-    context = state.get("context", {})
 
-    # Skip if this is already a scenario clarification response
+    # Skip if already in clarification flow
     if state.get("scenario_clarification_pending", False):
-        return {
-            "needs_scenario_clarification": False,
-        }
+        return {"needs_scenario_clarification": False}
 
-    # Get the last AI response
+    clarification_state = state.get("clarification_state")
+    if clarification_state and clarification_state.get("is_active", False):
+        return {"needs_scenario_clarification": False}
+
+    # Get last AI response
     last_ai_response = None
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and msg.content:
@@ -648,7 +665,7 @@ def analyze_response_scenarios(state: AgentState) -> dict:
     if not last_ai_response:
         return {"needs_scenario_clarification": False}
 
-    # Get original user question
+    # Get user question
     user_question = None
     for msg in messages:
         if isinstance(msg, HumanMessage):
@@ -658,38 +675,57 @@ def analyze_response_scenarios(state: AgentState) -> dict:
     if not user_question:
         return {"needs_scenario_clarification": False}
 
-    # Analyze the response for multiple scenarios
     try:
         analyzer = get_response_analyzer()
         analysis = analyzer.analyze_response(last_ai_response, user_question)
 
         if (
             analysis.get("has_multiple_scenarios", False)
-            and analysis.get("scenario_count", 0) > 1
+            and analysis.get("scenario_count", 0) >= 3
         ):
             scenarios = analysis.get("scenarios", [])
-            clarification_q = analysis.get("clarification_question", "")
-            options = analysis.get("clarification_options", [])
+            first_question = analysis.get("first_question", "")
+
+            # If no first question, use the identifying question from first scenario
+            if not first_question and scenarios:
+                first_question = scenarios[0].get(
+                    "identifying_question",
+                    "Could you describe what's happening when you try this?",
+                )
 
             print(
-                f"[ScenarioAnalysis] Detected {len(scenarios)} scenarios, asking for clarification"
+                f"[ScenarioAnalysis] Detected {len(scenarios)} scenarios, starting clarification flow"
             )
+
+            # Initialize clarification state
+            new_clarification_state = {
+                "is_active": True,
+                "attempt_count": 0,
+                "max_attempts": MAX_CLARIFICATION_ATTEMPTS,
+                "original_question": user_question,
+                "all_scenarios": scenarios,
+                "remaining_scenarios": scenarios.copy(),
+                "eliminated_scenarios": [],
+                "user_responses": [],
+                "asked_questions": [],
+                "current_question": first_question,
+                "gathered_context": "",
+            }
 
             return {
                 "needs_scenario_clarification": True,
                 "response_analysis": analysis,
-                "scenario_clarification_question": clarification_q,
-                "scenario_options": options,
+                "scenario_clarification_question": first_question,
                 "original_full_response": last_ai_response,
                 "parsed_scenarios": scenarios,
                 "awaiting_scenario_selection": True,
                 "original_query": user_question,
+                "clarification_state": new_clarification_state,
             }
         else:
-            print("[ScenarioAnalysis] Single scenario or direct answer detected")
             return {
                 "needs_scenario_clarification": False,
-                "response_analysis": analysis,
+                "clarification_state": None,
             }
 
     except Exception as e:
@@ -702,38 +738,20 @@ def analyze_response_scenarios(state: AgentState) -> dict:
 
 def ask_scenario_clarification(state: AgentState) -> dict:
     """
-    NEW NODE: Ask the user to clarify which scenario applies to them.
+    Ask the current clarification question.
     """
     context = state.get("context", {})
     session_id = context.get("session_id", "default")
     memory = memory_manager.get_or_create(session_id)
 
-    original_question = state.get("original_query", "your question")
-    scenarios = state.get("parsed_scenarios", [])
-    clarification_question = state.get("scenario_clarification_question", "")
-    options = state.get("scenario_options", [])
+    clarification_state = state.get("clarification_state", {})
+    current_question = clarification_state.get("current_question", "")
 
-    # Generate a natural clarification message
-    prompt = SCENARIO_CLARIFICATION_PROMPT.format(
-        original_question=original_question,
-        scenarios=json.dumps(scenarios, indent=2),
-        clarification_question=clarification_question,
-    )
-
-    try:
-        response = analyzer_llm.invoke([SystemMessage(content=prompt)])
-        clarification_message = response.content.strip()
-    except Exception as e:
-        # Fallback message
-        clarification_message = (
-            f"I found several possible situations that might apply to your question. "
-            f"{clarification_question}\n\n"
+    if not current_question:
+        current_question = state.get(
+            "scenario_clarification_question",
+            "Could you provide more details about what you're experiencing?",
         )
-        if options:
-            clarification_message += "The main possibilities are:\n"
-            for i, opt in enumerate(options[:5], 1):
-                clarification_message += f"{i}. {opt}\n"
-            clarification_message += "\nWhich one matches your situation?"
 
     # Save to memory
     user_msg = None
@@ -744,109 +762,258 @@ def ask_scenario_clarification(state: AgentState) -> dict:
 
     if user_msg:
         memory.add_user_message(user_msg, state.get("detected_topics", []))
-    memory.add_assistant_message(clarification_message)
+    memory.add_assistant_message(current_question)
+
+    # Update clarification state
+    if clarification_state:
+        clarification_state["asked_questions"].append(current_question)
 
     return {
-        "messages": [AIMessage(content=clarification_message)],
+        "messages": [AIMessage(content=current_question)],
         "awaiting_scenario_selection": True,
-        "pending_clarification": False,  # Different from vague query clarification
+        "pending_clarification": False,
+        "clarification_state": clarification_state,
     }
 
 
 def process_scenario_selection(state: AgentState) -> dict:
     """
-    NEW NODE: Process user's scenario selection and provide focused response.
+    Process user's response in multi-turn clarification flow.
+    Either narrow down, match, or ask another question.
     """
     context = state.get("context", {})
     session_id = context.get("session_id", "default")
     memory = memory_manager.get_or_create(session_id)
 
-    user_clarification = state.get("user_scenario_context", "")
-    scenarios = state.get("parsed_scenarios", [])
-    original_question = state.get("original_query", "")
-    full_response = state.get("original_full_response", "")
+    user_response = state.get("user_scenario_context", "")
+    clarification_state = state.get("clarification_state", {})
 
-    if not user_clarification or not scenarios:
-        # No clarification provided, return full response
+    # Get data from state
+    remaining_scenarios = clarification_state.get(
+        "remaining_scenarios", state.get("parsed_scenarios", [])
+    )
+    original_question = clarification_state.get(
+        "original_question", state.get("original_query", "")
+    )
+    gathered_context = clarification_state.get("gathered_context", "")
+    asked_questions = clarification_state.get("asked_questions", [])
+    attempt_count = clarification_state.get("attempt_count", 0)
+    max_attempts = clarification_state.get("max_attempts", MAX_CLARIFICATION_ATTEMPTS)
+    user_responses = clarification_state.get("user_responses", [])
+    last_question = asked_questions[-1] if asked_questions else ""
+
+    # Update tracking
+    user_responses.append(user_response)
+    attempt_count += 1
+
+    # Update gathered context
+    gathered_context = f"{gathered_context}\nUser said: {user_response}".strip()
+
+    # No match response
+    no_match_response = (
+        "I don't have specific information for that situation in my knowledge base. "
+        "Would you like to try asking about something else?"
+    )
+
+    if not user_response or not remaining_scenarios:
+        memory.add_user_message(user_response or "")
+        memory.add_assistant_message(no_match_response)
         return {
+            "messages": [AIMessage(content=no_match_response)],
             "awaiting_scenario_selection": False,
             "scenario_clarification_pending": False,
+            "clarification_state": None,
         }
 
-    # Match user's clarification to a scenario
     try:
         analyzer = get_response_analyzer()
-        match_result = analyzer.match_user_to_scenario(
-            scenarios, user_clarification, original_question
+
+        # Evaluate user's response
+        evaluation = analyzer.evaluate_user_response(
+            remaining_scenarios=remaining_scenarios,
+            user_response=user_response,
+            previous_context=gathered_context,
+            asked_question=last_question,
         )
 
-        matched_id = match_result.get("matched_scenario_id")
-        confidence = match_result.get("confidence", 0)
-        needs_more = match_result.get("needs_more_info", False)
+        matched_id = evaluation.get("matched_scenario_id")
+        confidence = evaluation.get("confidence_in_match", 0)
+        eliminated_ids = evaluation.get("eliminated_scenario_ids", [])
+        needs_more = evaluation.get("needs_more_info", True)
+        suggested_question = evaluation.get("suggested_next_question", "")
 
-        if matched_id is not None and confidence > 0.5:
-            # Find the matched scenario
+        print(
+            f"[ScenarioSelection] Attempt {attempt_count}/{max_attempts}, "
+            f"Confidence: {confidence}, Eliminated: {eliminated_ids}, "
+            f"Matched: {matched_id}"
+        )
+
+        # Filter out eliminated scenarios
+        if eliminated_ids:
+            remaining_scenarios = [
+                s for s in remaining_scenarios if s.get("id") not in eliminated_ids
+            ]
+
+        # Check if we have a confident match
+        if matched_id is not None and confidence >= 0.7:
             matched_scenario = None
-            for s in scenarios:
+            for s in clarification_state.get("all_scenarios", remaining_scenarios):
                 if s.get("id") == matched_id:
                     matched_scenario = s
                     break
 
             if matched_scenario:
-                # Generate focused response
-                focused_response = analyzer.generate_focused_response(
-                    matched_scenario, original_question, user_clarification
+                final_response = analyzer.generate_final_response(
+                    matched_scenario, gathered_context
                 )
 
-                # Save to memory
-                memory.add_user_message(
-                    user_clarification, state.get("detected_topics", [])
-                )
-                memory.add_assistant_message(focused_response)
+                memory.add_user_message(user_response, state.get("detected_topics", []))
+                memory.add_assistant_message(final_response)
 
                 return {
-                    "messages": [AIMessage(content=focused_response)],
+                    "messages": [AIMessage(content=final_response)],
                     "awaiting_scenario_selection": False,
                     "scenario_clarification_pending": False,
+                    "clarification_state": None,
                     "selected_scenario_id": matched_id,
                 }
 
-        # Couldn't match - ask for more info or provide full response
-        if needs_more:
-            follow_up = (
-                "I'm not quite sure which situation applies based on that. "
-                "Could you provide a bit more detail about what's happening? "
-                "For example, what error message are you seeing, or what steps led to this issue?"
+        # Check if only one scenario remains
+        if len(remaining_scenarios) == 1:
+            single_scenario = remaining_scenarios[0]
+            final_response = analyzer.generate_final_response(
+                single_scenario, gathered_context
             )
-            memory.add_user_message(user_clarification)
-            memory.add_assistant_message(follow_up)
+
+            memory.add_user_message(user_response, state.get("detected_topics", []))
+            memory.add_assistant_message(final_response)
 
             return {
-                "messages": [AIMessage(content=follow_up)],
-                "awaiting_scenario_selection": True,  # Keep waiting
-                "scenario_clarification_pending": False,
-            }
-        else:
-            # Provide the full response as fallback
-            memory.add_user_message(user_clarification)
-            memory.add_assistant_message(full_response)
-
-            return {
-                "messages": [AIMessage(content=full_response)],
+                "messages": [AIMessage(content=final_response)],
                 "awaiting_scenario_selection": False,
                 "scenario_clarification_pending": False,
+                "clarification_state": None,
             }
+
+        # Check if no scenarios remain
+        if len(remaining_scenarios) == 0:
+            memory.add_user_message(user_response)
+            memory.add_assistant_message(no_match_response)
+
+            return {
+                "messages": [AIMessage(content=no_match_response)],
+                "awaiting_scenario_selection": False,
+                "scenario_clarification_pending": False,
+                "clarification_state": None,
+            }
+
+        # Check if max attempts reached
+        if attempt_count >= max_attempts:
+            # Give best guess or give up
+            if remaining_scenarios:
+                # Provide the most likely scenario based on gathered context
+                best_scenario = remaining_scenarios[0]
+                fallback_response = (
+                    f"Based on what you've described, here's what might help:\n\n"
+                    f"{best_scenario.get('solution', 'Please contact support for assistance.')}\n\n"
+                    f"If this doesn't match your situation, please try describing the issue differently."
+                )
+            else:
+                fallback_response = no_match_response
+
+            memory.add_user_message(user_response)
+            memory.add_assistant_message(fallback_response)
+
+            return {
+                "messages": [AIMessage(content=fallback_response)],
+                "awaiting_scenario_selection": False,
+                "scenario_clarification_pending": False,
+                "clarification_state": None,
+            }
+
+        # Need more info - generate next question
+        if needs_more and len(remaining_scenarios) > 1:
+            # Use suggested question or generate new one
+            if suggested_question and suggested_question not in asked_questions:
+                next_question = suggested_question
+            else:
+                question_data = analyzer.generate_next_question(
+                    remaining_scenarios=remaining_scenarios,
+                    context=gathered_context,
+                    asked_questions=asked_questions,
+                )
+                next_question = question_data.get("question", "")
+
+            if not next_question:
+                # Use identifying question from most likely remaining scenario
+                likely_ids = evaluation.get("likely_scenario_ids", [])
+                if likely_ids:
+                    for s in remaining_scenarios:
+                        if s.get("id") in likely_ids:
+                            next_question = s.get("identifying_question", "")
+                            break
+
+                if not next_question and remaining_scenarios:
+                    next_question = remaining_scenarios[0].get(
+                        "identifying_question",
+                        "Could you describe the error in more detail?",
+                    )
+
+            # Update clarification state
+            updated_state = {
+                "is_active": True,
+                "attempt_count": attempt_count,
+                "max_attempts": max_attempts,
+                "original_question": original_question,
+                "all_scenarios": clarification_state.get(
+                    "all_scenarios", remaining_scenarios
+                ),
+                "remaining_scenarios": remaining_scenarios,
+                "eliminated_scenarios": clarification_state.get(
+                    "eliminated_scenarios", []
+                )
+                + eliminated_ids,
+                "user_responses": user_responses,
+                "asked_questions": asked_questions,
+                "current_question": next_question,
+                "gathered_context": gathered_context,
+            }
+
+            memory.add_user_message(user_response)
+            memory.add_assistant_message(next_question)
+
+            return {
+                "messages": [AIMessage(content=next_question)],
+                "awaiting_scenario_selection": True,
+                "scenario_clarification_pending": False,
+                "clarification_state": updated_state,
+            }
+
+        # Fallback - shouldn't normally reach here
+        memory.add_user_message(user_response)
+        memory.add_assistant_message(no_match_response)
+
+        return {
+            "messages": [AIMessage(content=no_match_response)],
+            "awaiting_scenario_selection": False,
+            "scenario_clarification_pending": False,
+            "clarification_state": None,
+        }
 
     except Exception as e:
         print(f"[ScenarioSelection] Error: {e}")
-        # Fallback - return full response
-        memory.add_user_message(user_clarification)
-        memory.add_assistant_message(full_response)
+        import traceback
+
+        traceback.print_exc()
+
+        memory.add_user_message(user_response)
+        memory.add_assistant_message(no_match_response)
 
         return {
-            "messages": [AIMessage(content=full_response)],
+            "messages": [AIMessage(content=no_match_response)],
             "awaiting_scenario_selection": False,
             "scenario_clarification_pending": False,
+            "clarification_state": None,
         }
 
 

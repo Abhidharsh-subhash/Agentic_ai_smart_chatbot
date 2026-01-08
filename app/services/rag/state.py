@@ -16,13 +16,30 @@ class ThinkingOutput(TypedDict):
 
 
 class ScenarioInfo(TypedDict):
-    """Structure for a single scenario extracted from response."""
+    """Structure for a single scenario."""
 
     id: int
     title: str
-    description: str
+    condition: str
     solution: str
     keywords: List[str]
+    differentiating_question: str  # Question that identifies this scenario
+
+
+class ClarificationState(TypedDict):
+    """State for multi-turn clarification flow."""
+
+    is_active: bool
+    attempt_count: int
+    max_attempts: int
+    original_question: str
+    all_scenarios: List[ScenarioInfo]
+    remaining_scenarios: List[ScenarioInfo]  # Scenarios still possible
+    eliminated_scenarios: List[int]  # IDs of eliminated scenarios
+    user_responses: List[str]  # All user responses in this flow
+    asked_questions: List[str]  # Questions we've already asked
+    current_question: str
+    gathered_context: str  # Accumulated context from user
 
 
 class ResponseAnalysis(TypedDict):
@@ -32,7 +49,6 @@ class ResponseAnalysis(TypedDict):
     scenario_count: int
     scenarios: List[ScenarioInfo]
     clarification_question: str
-    clarification_options: List[str]
     confidence: float
     reasoning: str
 
@@ -43,7 +59,7 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
     context: dict
 
-    # Clarification handling
+    # Clarification handling (for vague queries)
     clarification_needed: bool
     clarification_reason: str
     follow_up_questions: List[str]
@@ -84,16 +100,17 @@ class AgentState(TypedDict):
     is_follow_up_question: bool
     follow_up_context: str
 
-    # ============ NEW: Multi-Scenario Detection ============
+    # ============ Multi-Turn Scenario Clarification ============
     response_analysis: Optional[ResponseAnalysis]
     needs_scenario_clarification: bool
     scenario_clarification_question: str
     scenario_options: List[str]
-    original_full_response: str  # Store full response for later use
+    original_full_response: str
     parsed_scenarios: List[ScenarioInfo]
     awaiting_scenario_selection: bool
     selected_scenario_id: Optional[int]
-
-    # Track the flow
     scenario_clarification_pending: bool
-    user_scenario_context: str  # Store user's clarification response
+    user_scenario_context: str
+
+    # NEW: Multi-turn clarification tracking
+    clarification_state: Optional[ClarificationState]
