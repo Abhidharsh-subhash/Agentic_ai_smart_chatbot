@@ -43,6 +43,7 @@ class FileData(BaseModel):
     admin_id: UUID
     created_by: str        # admin username
     created_at: datetime  # IST
+    updated_at: datetime  # IST
 
     class Config:
         from_attributes = True

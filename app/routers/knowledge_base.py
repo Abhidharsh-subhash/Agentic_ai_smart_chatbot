@@ -547,6 +547,7 @@ async def get_folder_files(
             Files.unique_name,
             Files.admin_id,
             Files.created_at,
+            Files.updated_at,
             Admins.username.label("created_by"),
         )
         .join(Admins, Files.admin_id == Admins.id)
@@ -567,6 +568,11 @@ async def get_folder_files(
             if row.created_at.tzinfo
             else IST.localize(row.created_at)
         )
+        updated_at_ist = (
+            row.updated_at.astimezone(IST)
+            if row.updated_at.tzinfo
+            else IST.localize(row.updated_at)
+        )
 
         data.append(
             {
@@ -576,6 +582,7 @@ async def get_folder_files(
                 "admin_id": row.admin_id,
                 "created_by": row.created_by,
                 "created_at": created_at_ist,
+                "updated_at": updated_at_ist
             }
         )
 
@@ -619,6 +626,7 @@ async def get_deleted_files(
             Files.unique_name,
             Files.admin_id,
             Files.created_at,
+            Files.updated_at,
             Admins.username.label("created_by"),
         )
         .join(Admins, Files.admin_id == Admins.id)
@@ -639,6 +647,11 @@ async def get_deleted_files(
             if row.created_at.tzinfo
             else IST.localize(row.created_at)
         )
+        updated_at_ist = (
+            row.updated_at.astimezone(IST)
+            if row.updated_at.tzinfo
+            else IST.localize(row.updated_at)
+        )
 
         data.append(
             {
@@ -648,6 +661,7 @@ async def get_deleted_files(
                 "admin_id": row.admin_id,
                 "created_by": row.created_by,
                 "created_at": created_at_ist,
+                "updated_at": updated_at_ist,
             }
         )
 
