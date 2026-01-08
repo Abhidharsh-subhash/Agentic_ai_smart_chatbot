@@ -1,6 +1,8 @@
+# app/services/rag/analyzers.py
 import re
 import random
-from typing import List, Optional
+import json
+from typing import List, Optional, Dict
 from .config import Config, SearchQuality
 
 
@@ -270,13 +272,9 @@ class ResponseSanitizer:
         return sanitized.strip()
 
 
-# Add to app/services/rag/analyzers.py
-
-
 class HallucinationDetector:
     """Detect and filter hallucinated content."""
 
-    # Phrases that typically indicate hallucination/general knowledge
     HALLUCINATION_INDICATORS = [
         r"(?i)this could lead to",
         r"(?i)it('s| is) important to",
@@ -324,3 +322,303 @@ class HallucinationDetector:
             matches = re.findall(pattern, response)
             found.extend(matches)
         return found
+
+
+# ============================================
+# NEW: Response Scenario Analyzer
+# ============================================
+
+
+class ResponseScenarioAnalyzer:
+    """
+    Analyzes LLM responses to detect multiple scenarios that need user clarification.
+    Uses LLM to dynamically understand response structure.
+    """
+
+    ANALYSIS_PROMPT = """You are a response analyzer. Analyze the following response to determine if it contains multiple distinct scenarios, conditions, or cases that require user clarification.
+
+## RESPONSE TO ANALYZE:
+{response}
+
+## USER'S ORIGINAL QUESTION:
+{user_question}
+
+## YOUR TASK:
+Determine if this response presents multiple distinct scenarios where the user needs to clarify which one applies to their situation.
+
+Signs of multiple scenarios:
+- Numbered lists with different conditions (1., 2., 3., etc.)
+- "If X... then Y" patterns
+- Multiple root causes with different solutions
+- Different cases or situations described
+- Phrases like "could be because of", "reasons include", "depends on"
+
+## RESPOND WITH ONLY A JSON OBJECT (no markdown, no explanation):
+
+If multiple scenarios detected (3 or more distinct scenarios):
+{{
+    "has_multiple_scenarios": true,
+    "scenario_count": <number>,
+    "scenarios": [
+        {{
+            "id": 1,
+            "title": "Brief title for this scenario",
+            "description": "What condition/situation this describes",
+            "solution": "The solution for this scenario",
+            "keywords": ["keyword1", "keyword2"]
+        }}
+    ],
+    "clarification_question": "A natural question to ask user to identify their scenario",
+    "clarification_options": ["Option 1 description", "Option 2 description"],
+    "confidence": 0.95,
+    "reasoning": "Why this needs clarification"
+}}
+
+If single scenario or direct answer (fewer than 3 scenarios):
+{{
+    "has_multiple_scenarios": false,
+    "scenario_count": 1,
+    "scenarios": [],
+    "clarification_question": "",
+    "clarification_options": [],
+    "confidence": 0.95,
+    "reasoning": "Why this is a direct answer"
+}}"""
+
+    MATCH_SCENARIO_PROMPT = """Based on the user's clarification, identify which scenario best matches their situation.
+
+## AVAILABLE SCENARIOS:
+{scenarios}
+
+## USER'S CLARIFICATION:
+{user_clarification}
+
+## ORIGINAL QUESTION:
+{original_question}
+
+Respond with ONLY a JSON object:
+{{
+    "matched_scenario_id": <id number or null if no clear match>,
+    "confidence": <0.0 to 1.0>,
+    "matched_keywords": ["keywords that matched"],
+    "reasoning": "Why this scenario matches",
+    "needs_more_info": false
+}}
+
+If no scenario clearly matches, set matched_scenario_id to null and needs_more_info to true."""
+
+    FOCUSED_RESPONSE_PROMPT = """Based on the user's situation, provide a focused, helpful response.
+
+## USER'S ORIGINAL QUESTION:
+{original_question}
+
+## USER'S SPECIFIC SITUATION:
+{user_context}
+
+## RELEVANT SCENARIO:
+Title: {scenario_title}
+Description: {scenario_description}
+Solution: {scenario_solution}
+
+Generate a response that:
+1. Acknowledges their specific situation briefly
+2. Provides the solution clearly and directly
+3. Is concise and actionable
+4. Does NOT mention other scenarios
+
+Keep it helpful and under 100 words."""
+
+    def __init__(self, llm=None):
+        self._llm = llm
+
+    @property
+    def llm(self):
+        """Lazy load LLM to avoid import issues."""
+        if self._llm is None:
+            from langchain_openai import ChatOpenAI
+            from app.core.config import settings
+
+            self._llm = ChatOpenAI(
+                model=getattr(settings, "openai_model", "gpt-4o"),
+                temperature=0.0,
+                openai_api_key=settings.openai_api_key,
+            )
+        return self._llm
+
+    def analyze_response(self, response: str, user_question: str) -> Dict:
+        """
+        Analyze a response to detect if it contains multiple scenarios.
+
+        Returns:
+            Dict with analysis results including scenarios and clarification question
+        """
+        from langchain_core.messages import SystemMessage
+
+        if not response or len(response) < 100:
+            return self._single_scenario_result(
+                "Response too short for multiple scenarios"
+            )
+
+        prompt = self.ANALYSIS_PROMPT.format(
+            response=response, user_question=user_question
+        )
+
+        try:
+            result = self.llm.invoke([SystemMessage(content=prompt)])
+            response_text = result.content.strip()
+
+            # Parse JSON from response
+            analysis = self._extract_json(response_text)
+
+            # Validate required fields
+            if not isinstance(analysis, dict):
+                return self._single_scenario_result("Invalid analysis format")
+
+            # Ensure all required fields exist
+            analysis.setdefault("has_multiple_scenarios", False)
+            analysis.setdefault("scenario_count", 0)
+            analysis.setdefault("scenarios", [])
+            analysis.setdefault("clarification_question", "")
+            analysis.setdefault("clarification_options", [])
+            analysis.setdefault("confidence", 0.0)
+            analysis.setdefault("reasoning", "")
+
+            # Only consider it multi-scenario if 3+ scenarios
+            if analysis.get("scenario_count", 0) < 3:
+                analysis["has_multiple_scenarios"] = False
+
+            return analysis
+
+        except Exception as e:
+            print(f"[ResponseAnalyzer] Error analyzing response: {e}")
+            return self._single_scenario_result(f"Analysis error: {str(e)}")
+
+    def match_user_to_scenario(
+        self, scenarios: List[Dict], user_clarification: str, original_question: str
+    ) -> Dict:
+        """
+        Match user's clarification to the most relevant scenario.
+
+        Returns:
+            Dict with matched_scenario_id and confidence
+        """
+        from langchain_core.messages import SystemMessage
+
+        if not scenarios:
+            return {
+                "matched_scenario_id": None,
+                "confidence": 0.0,
+                "needs_more_info": True,
+                "reasoning": "No scenarios available",
+            }
+
+        # Format scenarios for prompt
+        scenarios_text = json.dumps(scenarios, indent=2)
+
+        prompt = self.MATCH_SCENARIO_PROMPT.format(
+            scenarios=scenarios_text,
+            user_clarification=user_clarification,
+            original_question=original_question,
+        )
+
+        try:
+            result = self.llm.invoke([SystemMessage(content=prompt)])
+            response_text = result.content.strip()
+
+            match_result = self._extract_json(response_text)
+
+            # Validate
+            match_result.setdefault("matched_scenario_id", None)
+            match_result.setdefault("confidence", 0.0)
+            match_result.setdefault("needs_more_info", True)
+            match_result.setdefault("reasoning", "")
+            match_result.setdefault("matched_keywords", [])
+
+            return match_result
+
+        except Exception as e:
+            print(f"[ResponseAnalyzer] Error matching scenario: {e}")
+            return {
+                "matched_scenario_id": None,
+                "confidence": 0.0,
+                "needs_more_info": True,
+                "reasoning": f"Matching error: {str(e)}",
+            }
+
+    def generate_focused_response(
+        self, scenario: Dict, original_question: str, user_context: str
+    ) -> str:
+        """
+        Generate a focused response for a specific scenario.
+        """
+        from langchain_core.messages import SystemMessage
+
+        prompt = self.FOCUSED_RESPONSE_PROMPT.format(
+            original_question=original_question,
+            user_context=user_context,
+            scenario_title=scenario.get("title", "N/A"),
+            scenario_description=scenario.get("description", "N/A"),
+            scenario_solution=scenario.get("solution", "N/A"),
+        )
+
+        try:
+            result = self.llm.invoke([SystemMessage(content=prompt)])
+            return result.content.strip()
+        except Exception as e:
+            # Fallback to direct scenario info
+            return f"{scenario.get('description', '')}\n\nSolution: {scenario.get('solution', 'Please try again.')}"
+
+    def _extract_json(self, text: str) -> Dict:
+        """Extract JSON from LLM response."""
+        # Try direct parse
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Try to extract from code blocks
+        patterns = [
+            r"```json\s*([\s\S]*?)\s*```",
+            r"```\s*([\s\S]*?)\s*```",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    return json.loads(match.group(1).strip())
+                except (json.JSONDecodeError, IndexError):
+                    continue
+
+        # Try to find JSON object
+        brace_start = text.find("{")
+        if brace_start != -1:
+            brace_count = 0
+            for i, char in enumerate(text[brace_start:], brace_start):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        try:
+                            return json.loads(text[brace_start : i + 1])
+                        except json.JSONDecodeError:
+                            break
+
+        raise ValueError(f"Could not extract JSON from: {text[:200]}")
+
+    def _single_scenario_result(self, reason: str) -> Dict:
+        """Return a standard single-scenario result."""
+        return {
+            "has_multiple_scenarios": False,
+            "scenario_count": 1,
+            "scenarios": [],
+            "clarification_question": "",
+            "clarification_options": [],
+            "confidence": 1.0,
+            "reasoning": reason,
+        }
+
+
+# Singleton instance (lazy initialization)
+response_scenario_analyzer = ResponseScenarioAnalyzer()

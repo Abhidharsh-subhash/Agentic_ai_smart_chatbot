@@ -1,3 +1,4 @@
+# app/services/rag/graph.py
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -14,28 +15,55 @@ from .nodes import (
     validate_search_results,
     handle_not_found,
     save_to_memory,
+    # New nodes
+    analyze_response_scenarios,
+    ask_scenario_clarification,
+    process_scenario_selection,
+    # Routing functions
     should_continue,
     route_after_analysis,
     route_after_validation,
+    route_after_scenario_analysis,
 )
 
 
 def create_rag_graph():
-    """Create and compile the RAG agent graph with CoT and Memory."""
+    """Create and compile the RAG agent graph with CoT, Memory, and Scenario Detection."""
     workflow = StateGraph(AgentState)
 
-    # Add nodes
+    # ============================================
+    # ADD NODES
+    # ============================================
+
+    # Input analysis
     workflow.add_node("analyze_input", analyze_input)
-    workflow.add_node("think_and_plan", think_and_plan)  # NEW: CoT node
+
+    # Chain of Thought
+    workflow.add_node("think_and_plan", think_and_plan)
+
+    # Special handlers
     workflow.add_node("handle_greeting", handle_greeting)
     workflow.add_node("handle_closing", handle_closing)
     workflow.add_node("handle_document_listing", handle_document_listing)
     workflow.add_node("ask_clarification", ask_clarification)
+
+    # Main agent and tools
     workflow.add_node("agent", agent)
     workflow.add_node("tools", tool_node)
     workflow.add_node("validate_search", validate_search_results)
     workflow.add_node("handle_not_found", handle_not_found)
-    workflow.add_node("save_memory", save_to_memory)  # NEW: Memory node
+
+    # NEW: Scenario analysis nodes
+    workflow.add_node("analyze_scenarios", analyze_response_scenarios)
+    workflow.add_node("ask_scenario_clarification", ask_scenario_clarification)
+    workflow.add_node("process_scenario_selection", process_scenario_selection)
+
+    # Memory
+    workflow.add_node("save_memory", save_to_memory)
+
+    # ============================================
+    # EDGES
+    # ============================================
 
     # Entry point
     workflow.add_edge(START, "analyze_input")
@@ -49,7 +77,8 @@ def create_rag_graph():
             "handle_closing": "handle_closing",
             "handle_document_listing": "handle_document_listing",
             "ask_clarification": "ask_clarification",
-            "think_and_plan": "think_and_plan",  # Go to CoT
+            "think_and_plan": "think_and_plan",
+            "process_scenario_selection": "process_scenario_selection",  # NEW: Handle scenario responses
         },
     )
 
@@ -62,11 +91,22 @@ def create_rag_graph():
     workflow.add_edge("handle_document_listing", END)
     workflow.add_edge("ask_clarification", END)
     workflow.add_edge("handle_not_found", END)
-    workflow.add_edge("save_memory", END)  # Memory save then END
+    workflow.add_edge("save_memory", END)
+    workflow.add_edge(
+        "ask_scenario_clarification", END
+    )  # NEW: After asking clarification, END and wait
+    workflow.add_edge(
+        "process_scenario_selection", END
+    )  # NEW: After processing selection, END
 
-    # Agent -> Tools or Save Memory
+    # Agent -> Tools or Analyze Scenarios
     workflow.add_conditional_edges(
-        "agent", should_continue, {"tools": "tools", "save_memory": "save_memory"}
+        "agent",
+        should_continue,
+        {
+            "tools": "tools",
+            "analyze_scenarios": "analyze_scenarios",  # Changed from save_memory
+        },
     )
 
     # Tools -> Validate Search Results
@@ -77,6 +117,16 @@ def create_rag_graph():
         "validate_search",
         route_after_validation,
         {"handle_not_found": "handle_not_found", "agent": "agent"},
+    )
+
+    # NEW: After scenario analysis -> Ask clarification or Save memory
+    workflow.add_conditional_edges(
+        "analyze_scenarios",
+        route_after_scenario_analysis,
+        {
+            "ask_scenario_clarification": "ask_scenario_clarification",
+            "save_memory": "save_memory",
+        },
     )
 
     # Compile with memory

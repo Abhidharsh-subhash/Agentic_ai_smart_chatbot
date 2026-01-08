@@ -38,7 +38,7 @@ class SessionData:
     """Complete session data stored in Redis."""
 
     session_id: str
-    chat_history: List[dict] = field(default_factory=list)  # List of ChatMessage dicts
+    chat_history: List[dict] = field(default_factory=list)
     topics: List[str] = field(default_factory=list)
     summary: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -46,18 +46,22 @@ class SessionData:
     total_questions: int = 0
     status: str = "active"
 
-    # Pending question (waiting for answer)
+    # Pending question
     pending_question: Optional[str] = None
     pending_question_timestamp: Optional[str] = None
     pending_topics: List[str] = field(default_factory=list)
 
+    # NEW: Scenario clarification state
+    awaiting_scenario_selection: bool = False
+    pending_scenarios: List[dict] = field(default_factory=list)
+    original_question_for_scenarios: str = ""
+    full_response_for_scenarios: str = ""
+
     def to_json(self) -> str:
-        """Serialize to JSON string."""
         return json.dumps(asdict(self))
 
     @classmethod
     def from_json(cls, json_str: str) -> "SessionData":
-        """Deserialize from JSON string."""
         data = json.loads(json_str)
         return cls(**data)
 
@@ -469,6 +473,60 @@ class ConversationMemory:
         """Get complete session data as dictionary."""
         data = self._get_session_data()
         return asdict(data)
+
+    def set_pending_scenarios(
+        self, scenarios: List[Dict], original_question: str, full_response: str
+    ):
+        """Store pending scenarios for clarification flow."""
+        data = self._get_session_data()
+
+        # Store in a new field (add to SessionData if needed)
+        scenario_state = {
+            "scenarios": scenarios,
+            "original_question": original_question,
+            "full_response": full_response,
+            "awaiting_selection": True,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Use metadata storage
+        if self._use_fallback():
+            if not hasattr(self, "_scenario_state"):
+                self._scenario_state = {}
+            self._scenario_state[self.session_id] = scenario_state
+        else:
+            try:
+                scenario_key = f"{self._key}:scenarios"
+                self.redis.set(scenario_key, json.dumps(scenario_state), ex=TTL_SECONDS)
+            except Exception as e:
+                print(f"Error storing scenario state: {e}")
+
+    def get_pending_scenarios(self) -> Optional[Dict]:
+        """Retrieve pending scenarios if any."""
+        if self._use_fallback():
+            return getattr(self, "_scenario_state", {}).get(self.session_id)
+
+        try:
+            scenario_key = f"{self._key}:scenarios"
+            raw = self.redis.get(scenario_key)
+            if raw:
+                return json.loads(raw)
+        except Exception as e:
+            print(f"Error retrieving scenario state: {e}")
+
+        return None
+
+    def clear_pending_scenarios(self):
+        """Clear pending scenarios after resolution."""
+        if self._use_fallback():
+            if hasattr(self, "_scenario_state"):
+                self._scenario_state.pop(self.session_id, None)
+        else:
+            try:
+                scenario_key = f"{self._key}:scenarios"
+                self.redis.delete(scenario_key)
+            except Exception as e:
+                print(f"Error clearing scenario state: {e}")
 
 
 class MemoryManager:

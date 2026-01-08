@@ -3,7 +3,7 @@ import json
 from langchain_core.tools import tool
 from app.services.embeddings import embedding_service
 from .config import Config, SearchQuality
-from .analyzers import SearchResultAnalyzer
+from .analyzers import SearchResultAnalyzer, ResponseScenarioAnalyzer
 
 
 @tool
@@ -121,5 +121,81 @@ def get_available_topics() -> str:
         return json.dumps({"topics": [], "error": str(e)})
 
 
+@tool
+def analyze_response_for_scenarios(response: str, user_question: str) -> str:
+    """
+    Analyze an LLM response to detect if it contains multiple scenarios
+    that require user clarification.
+
+    Use this tool AFTER getting initial search results and before sending final response.
+    If multiple scenarios are detected, the user should be asked to clarify their situation.
+
+    Args:
+        response: The generated response to analyze
+        user_question: The user's original question
+
+    Returns:
+        JSON with analysis results including:
+        - has_multiple_scenarios: bool
+        - scenarios: list of detected scenarios
+        - clarification_question: suggested question to ask user
+    """
+    try:
+        analyzer = ResponseScenarioAnalyzer()
+        analysis = analyzer.analyze_response(response, user_question)
+        return json.dumps(analysis)
+    except Exception as e:
+        return json.dumps(
+            {
+                "has_multiple_scenarios": False,
+                "error": str(e),
+                "scenarios": [],
+                "clarification_question": "",
+            }
+        )
+
+
+@tool
+def match_user_clarification_to_scenario(
+    scenarios_json: str, user_clarification: str, original_question: str
+) -> str:
+    """
+    Match user's clarification response to the most relevant scenario.
+
+    Use this tool when user provides clarification after being asked about their specific situation.
+
+    Args:
+        scenarios_json: JSON string of available scenarios
+        user_clarification: User's response describing their situation
+        original_question: The original question that started this flow
+
+    Returns:
+        JSON with matched scenario and confidence score
+    """
+    try:
+        scenarios = (
+            json.loads(scenarios_json)
+            if isinstance(scenarios_json, str)
+            else scenarios_json
+        )
+        analyzer = ResponseScenarioAnalyzer()
+        result = analyzer.match_user_to_scenario(
+            scenarios, user_clarification, original_question
+        )
+        return json.dumps(result)
+    except Exception as e:
+        return json.dumps(
+            {
+                "matched_scenario_id": None,
+                "confidence": 0.0,
+                "error": str(e),
+                "needs_more_info": True,
+            }
+        )
+
+
 # Export tools list
 tools = [search_documents, get_available_topics]
+
+# Separate tools for response analysis (used internally, not by main agent)
+analysis_tools = [analyze_response_for_scenarios, match_user_clarification_to_scenario]
