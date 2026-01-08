@@ -271,7 +271,7 @@ def think_and_plan(state: AgentState) -> dict:
 
     # Get conversation memory
     memory = memory_manager.get_or_create(session_id)
-    conversation_context = memory.get_context_window(n_turns=4)
+    conversation_context = memory.get_context_window(n_exchanges=4)
     topics_discussed = memory.get_topics_discussed()
 
     # Build thinking prompt
@@ -476,7 +476,7 @@ def agent(state: AgentState) -> dict:
 
     # Get conversation memory
     memory = memory_manager.get_or_create(session_id)
-    conversation_context = memory.get_context_window(n_turns=4)
+    conversation_context = memory.get_context_window(n_exchanges=4)
 
     # Format thinking output for prompt
     if thinking:

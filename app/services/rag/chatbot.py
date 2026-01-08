@@ -1,4 +1,5 @@
-import asyncio, json
+import asyncio
+import json
 from datetime import datetime
 from typing import List, Optional
 from langchain_core.messages import HumanMessage, AIMessage
@@ -11,23 +12,36 @@ from .memory import memory_manager
 
 
 class ChatbotService:
-    """Chatbot service with CoT and Memory."""
+    """Chatbot service with CoT and Redis-backed Memory."""
 
     def __init__(self, session_id: Optional[str] = None):
         self.agent = create_rag_graph()
         self.session_id = session_id or f"session_{datetime.now().timestamp()}"
+
+        # Transient context (resets on server restart, but that's OK for these fields)
         self.context = {
-            "session_id": self.session_id,  # Important for memory
+            "session_id": self.session_id,
             "last_topic": None,
             "topics_discussed": [],
             "questions_asked": 0,
             "session_start": datetime.now().isoformat(),
         }
-        self.topic_history: List[str] = []
-        self.conversation_history: List[dict] = []
+
+        # Clarification state (transient - OK if lost on restart)
         self.pending_clarification = False
         self.original_query: Optional[str] = None
         self.clarification_attempts = 0
+
+        # Initialize memory (backed by Redis)
+        self._memory = memory_manager.get_or_create(self.session_id)
+
+        # Restore questions_asked from Redis metadata if available
+        stored_count = self._memory.get_metadata("questions_asked")
+        if stored_count:
+            try:
+                self.context["questions_asked"] = int(stored_count)
+            except ValueError:
+                pass
 
     def _extract_topics(self, message: str) -> List[str]:
         """Extract topics from message."""
@@ -56,9 +70,20 @@ class ChatbotService:
 
         if topics:
             self.context["last_topic"] = topics[0]
-            self.topic_history.extend(topics)
+            # Update topics in context (transient list for current session object)
+            for t in topics:
+                if t not in self.context["topics_discussed"]:
+                    self.context["topics_discussed"].append(t)
 
         self.context["questions_asked"] += 1
+
+        # Persist question count to Redis
+        self._memory.set_metadata(
+            "questions_asked", str(self.context["questions_asked"])
+        )
+
+        # Refresh TTL on all session keys
+        self._memory.refresh_ttl()
 
         return {
             "messages": [HumanMessage(content=message)],
@@ -73,8 +98,9 @@ class ChatbotService:
             "detected_topics": topics,
             "sentiment": "neutral",
             "interaction_mode": InteractionMode.QUERY.value,
-            "conversation_history": self.conversation_history,
-            "topic_history": self.topic_history,
+            # These will be populated by nodes from Redis
+            "conversation_history": [],
+            "topic_history": [],
             "search_confidence": 0.0,
             "search_quality": "",
             "has_searched": False,
@@ -83,10 +109,10 @@ class ChatbotService:
             "best_match_score": float("inf"),
             "should_respond_not_found": False,
             "not_found_message": "",
-            # New CoT fields
+            # CoT fields
             "thinking": None,
             "planned_search_queries": [],
-            # New Memory fields
+            # Memory fields
             "conversation_summary": "",
             "last_assistant_response": "",
             "last_user_query": "",
@@ -107,16 +133,12 @@ class ChatbotService:
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and msg.content:
                 response = msg.content
-
                 is_not_found = result.get("should_respond_not_found", False)
 
                 if not is_not_found:
-                    # Check for general knowledge/hallucination
                     if ResponseSanitizer.contains_general_knowledge(response):
-                        # Get the search results from the state if available
                         search_results = result.get("search_results", "")
                         if search_results:
-                            # Try to extract just the document content
                             response = self._extract_document_answer(
                                 search_results, message
                             )
@@ -128,10 +150,8 @@ class ChatbotService:
                     else:
                         response = ResponseSanitizer.sanitize(response)
 
-                self.conversation_history.append({"role": "user", "content": message})
-                self.conversation_history.append(
-                    {"role": "assistant", "content": response}
-                )
+                # NOTE: We do NOT manually append to history here.
+                # The 'save_memory' node in the Graph handles writing to Redis.
 
                 return response
 
@@ -148,7 +168,6 @@ class ChatbotService:
             documents = results.get("documents", [])
 
             if documents:
-                # Return the most relevant document content
                 best_doc = documents[0].get("content", "")
                 if best_doc:
                     return f"Based on the documentation: {best_doc}"
@@ -178,9 +197,10 @@ class ChatbotService:
 
     def reset(self):
         """Reset conversation state."""
-        # Clear memory for this session
+        # Clear Redis data
         memory_manager.remove(self.session_id)
 
+        # Reset transient state
         self.context = {
             "session_id": self.session_id,
             "last_topic": None,
@@ -188,21 +208,28 @@ class ChatbotService:
             "questions_asked": 0,
             "session_start": datetime.now().isoformat(),
         }
-        self.topic_history = []
-        self.conversation_history = []
         self.pending_clarification = False
         self.original_query = None
         self.clarification_attempts = 0
+
+        # Re-initialize memory
+        self._memory = memory_manager.get_or_create(self.session_id)
 
     def get_conversation_summary(self) -> dict:
         """Get summary of current conversation."""
         memory = memory_manager.get_or_create(self.session_id)
         return {
             "session_id": self.session_id,
-            "turns": len(memory.turns),
+            "turns": memory.get_turn_count(),
             "topics_discussed": memory.key_topics,
             "questions_asked": self.context.get("questions_asked", 0),
+            "recent_context": memory.get_context_window(n_turns=3),
         }
+
+    def get_conversation_history(self) -> List[dict]:
+        """Get full conversation history from Redis."""
+        memory = memory_manager.get_or_create(self.session_id)
+        return [turn.to_dict() for turn in memory.turns]
 
 
 class SessionManager:
@@ -220,7 +247,7 @@ class SessionManager:
     def remove(self, session_id: str):
         """Remove a session."""
         if session_id in self._sessions:
-            # Also remove memory
+            # Clear Redis data
             memory_manager.remove(session_id)
             del self._sessions[session_id]
 
@@ -229,7 +256,16 @@ class SessionManager:
         memory_manager.clear_all()
         self._sessions.clear()
 
+    def get_session_count(self) -> int:
+        """Get number of active sessions."""
+        return len(self._sessions)
 
+    def get_all_session_ids(self) -> List[str]:
+        """Get all active session IDs."""
+        return list(self._sessions.keys())
+
+
+# Global session manager
 session_manager = SessionManager()
 
 
