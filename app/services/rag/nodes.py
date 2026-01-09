@@ -145,7 +145,7 @@ Be helpful and direct."""
 # Tool node
 tool_node = ToolNode(tools)
 
-MAX_CLARIFICATION_ATTEMPTS = 4  # Maximum follow-up questions before giving up
+MAX_CLARIFICATION_ATTEMPTS = 10  # Maximum follow-up questions before giving up
 
 
 # ============================================
@@ -681,7 +681,7 @@ def analyze_response_scenarios(state: AgentState) -> dict:
 
         if (
             analysis.get("has_multiple_scenarios", False)
-            and analysis.get("scenario_count", 0) >= 3
+            and analysis.get("scenario_count", 0) >= 2  # Changed from 3 to 2
         ):
             scenarios = analysis.get("scenarios", [])
             first_question = analysis.get("first_question", "")
@@ -693,15 +693,28 @@ def analyze_response_scenarios(state: AgentState) -> dict:
                     "Could you describe what's happening when you try this?",
                 )
 
+            # Get the first scenario's ID for tracking
+            first_scenario_id = scenarios[0].get("id") if scenarios else None
+
             print(
                 f"[ScenarioAnalysis] Detected {len(scenarios)} scenarios, starting clarification flow"
+            )
+
+            # ============ DYNAMIC MAX ATTEMPTS ============
+            # Set max attempts based on number of scenarios
+            # Each scenario gets ONE chance to be asked about
+            # We cap it at MAX_CLARIFICATION_ATTEMPTS for safety
+            dynamic_max_attempts = min(len(scenarios), MAX_CLARIFICATION_ATTEMPTS)
+
+            print(
+                f"[ScenarioAnalysis] Dynamic max attempts set to: {dynamic_max_attempts}"
             )
 
             # Initialize clarification state
             new_clarification_state = {
                 "is_active": True,
                 "attempt_count": 0,
-                "max_attempts": MAX_CLARIFICATION_ATTEMPTS,
+                "max_attempts": dynamic_max_attempts,  # DYNAMIC instead of hardcoded
                 "original_question": user_question,
                 "all_scenarios": scenarios,
                 "remaining_scenarios": scenarios.copy(),
@@ -710,6 +723,11 @@ def analyze_response_scenarios(state: AgentState) -> dict:
                 "asked_questions": [],
                 "current_question": first_question,
                 "gathered_context": "",
+                # NEW: Track which scenario the current question is about
+                "current_scenario_id": first_scenario_id,
+                "scenario_question_map": {
+                    s.get("id"): s.get("identifying_question", "") for s in scenarios
+                },
             }
 
             return {
@@ -739,6 +757,7 @@ def analyze_response_scenarios(state: AgentState) -> dict:
 def ask_scenario_clarification(state: AgentState) -> dict:
     """
     Ask the current clarification question.
+    Track which scenario this question is about.
     """
     context = state.get("context", {})
     session_id = context.get("session_id", "default")
@@ -764,9 +783,19 @@ def ask_scenario_clarification(state: AgentState) -> dict:
         memory.add_user_message(user_msg, state.get("detected_topics", []))
     memory.add_assistant_message(current_question)
 
-    # Update clarification state
+    # Update clarification state with question tracking
     if clarification_state:
         clarification_state["asked_questions"].append(current_question)
+
+        # Find and track which scenario this question is for
+        remaining = clarification_state.get("remaining_scenarios", [])
+        for scenario in remaining:
+            if scenario.get("identifying_question") == current_question:
+                clarification_state["current_scenario_id"] = scenario.get("id")
+                print(
+                    f"[AskClarification] Tracking scenario ID: {scenario.get('id')} for question"
+                )
+                break
 
     return {
         "messages": [AIMessage(content=current_question)],
@@ -798,9 +827,11 @@ def process_scenario_selection(state: AgentState) -> dict:
     gathered_context = clarification_state.get("gathered_context", "")
     asked_questions = clarification_state.get("asked_questions", [])
     attempt_count = clarification_state.get("attempt_count", 0)
-    max_attempts = clarification_state.get("max_attempts", MAX_CLARIFICATION_ATTEMPTS)
+    max_attempts = clarification_state.get("max_attempts", len(remaining_scenarios))
     user_responses = clarification_state.get("user_responses", [])
     last_question = asked_questions[-1] if asked_questions else ""
+    current_scenario_id = clarification_state.get("current_scenario_id")
+    all_scenarios = clarification_state.get("all_scenarios", [])
 
     # Update tracking
     user_responses.append(user_response)
@@ -809,11 +840,37 @@ def process_scenario_selection(state: AgentState) -> dict:
     # Update gathered context
     gathered_context = f"{gathered_context}\nUser said: {user_response}".strip()
 
-    # No match response
-    no_match_response = (
-        "I don't have specific information for that situation in my knowledge base. "
-        "Would you like to try asking about something else?"
-    )
+    # ============ HELPER: Generate options list ============
+    def get_available_options_message():
+        """Generate a message listing all available options."""
+        if not all_scenarios:
+            return "Could you please rephrase your question or provide more details?"
+
+        # Extract titles or conditions from all scenarios
+        options = []
+        for s in all_scenarios:
+            title = s.get("title", "")
+            condition = s.get("condition", "")
+            if title:
+                options.append(title)
+            elif condition:
+                options.append(condition)
+
+        if options:
+            options_list = ", ".join(options[:-1])
+            if len(options) > 1:
+                options_list += f" or {options[-1]}"
+            else:
+                options_list = options[0]
+            return (
+                f"I couldn't find an exact match for your situation. "
+                f"I have information about: {options_list}.\n\n"
+                f"Could you please specify which one applies to you, or describe your situation in more detail?"
+            )
+        return "Could you please rephrase your question or provide more details about your specific situation?"
+
+    # No match response - now more helpful
+    no_match_response = get_available_options_message()
 
     if not user_response or not remaining_scenarios:
         memory.add_user_message(user_response or "")
@@ -825,6 +882,186 @@ def process_scenario_selection(state: AgentState) -> dict:
             "clarification_state": None,
         }
 
+    # ============ HANDLE EXPLICIT "NO" RESPONSES ============
+    user_lower = user_response.lower().strip()
+    is_explicit_no = user_lower in [
+        "no",
+        "nope",
+        "n",
+        "not that",
+        "not this",
+        "no, not that",
+        "nah",
+        "negative",
+        "none of these",
+        "neither",
+        "not really",
+        "no thanks",
+        "not applicable",
+        "na",
+        "nop",
+    ]
+
+    # Check for explicit "yes" responses
+    is_explicit_yes = user_lower in [
+        "yes",
+        "yeah",
+        "yep",
+        "y",
+        "correct",
+        "that's right",
+        "right",
+        "exactly",
+        "yes please",
+        "yup",
+        "affirmative",
+        "that one",
+        "yes, that's it",
+        "that's the one",
+        "bingo",
+        "yes!",
+    ]
+
+    # If user explicitly said "yes" and we know which scenario was asked about
+    if is_explicit_yes and current_scenario_id is not None:
+        print(
+            f"[ScenarioSelection] User said 'yes' - matching scenario {current_scenario_id}"
+        )
+
+        # Find the matched scenario
+        matched_scenario = None
+        for s in all_scenarios:
+            if s.get("id") == current_scenario_id:
+                matched_scenario = s
+                break
+
+        if matched_scenario:
+            analyzer = get_response_analyzer()
+            final_response = analyzer.generate_final_response(
+                matched_scenario, gathered_context
+            )
+
+            memory.add_user_message(user_response, state.get("detected_topics", []))
+            memory.add_assistant_message(final_response)
+
+            return {
+                "messages": [AIMessage(content=final_response)],
+                "awaiting_scenario_selection": False,
+                "scenario_clarification_pending": False,
+                "clarification_state": None,
+                "selected_scenario_id": current_scenario_id,
+            }
+
+    # If user explicitly said "no" and we know which scenario was asked about
+    if is_explicit_no and current_scenario_id is not None:
+        print(
+            f"[ScenarioSelection] User said 'no' - eliminating scenario {current_scenario_id}"
+        )
+
+        # Immediately eliminate the current scenario
+        remaining_scenarios = [
+            s for s in remaining_scenarios if s.get("id") != current_scenario_id
+        ]
+        eliminated_scenarios = clarification_state.get("eliminated_scenarios", [])
+        eliminated_scenarios.append(current_scenario_id)
+
+        print(
+            f"[ScenarioSelection] Remaining scenarios after elimination: {len(remaining_scenarios)}"
+        )
+
+        # Check if we've exhausted all scenarios
+        if len(remaining_scenarios) == 0:
+            print(
+                f"[ScenarioSelection] All scenarios eliminated - asking for clarification"
+            )
+
+            # Generate helpful message with all options
+            clarification_message = get_available_options_message()
+
+            memory.add_user_message(user_response)
+            memory.add_assistant_message(clarification_message)
+            return {
+                "messages": [AIMessage(content=clarification_message)],
+                "awaiting_scenario_selection": False,
+                "scenario_clarification_pending": False,
+                "clarification_state": None,
+            }
+
+        # If only one scenario remains, ASK about it instead of assuming
+        if len(remaining_scenarios) == 1:
+            last_scenario = remaining_scenarios[0]
+            last_scenario_title = last_scenario.get("title", "this option")
+
+            # Ask specifically about the last scenario
+            confirmation_question = f"Is your question about {last_scenario_title}?"
+
+            # Update clarification state to track we're asking about the last one
+            updated_state = {
+                "is_active": True,
+                "attempt_count": attempt_count,
+                "max_attempts": max_attempts,
+                "original_question": original_question,
+                "all_scenarios": all_scenarios,
+                "remaining_scenarios": remaining_scenarios,
+                "eliminated_scenarios": eliminated_scenarios,
+                "user_responses": user_responses,
+                "asked_questions": asked_questions + [confirmation_question],
+                "current_question": confirmation_question,
+                "gathered_context": gathered_context,
+                "current_scenario_id": last_scenario.get("id"),
+                "scenario_question_map": clarification_state.get(
+                    "scenario_question_map", {}
+                ),
+                "is_last_scenario_confirmation": True,  # NEW: Flag to track this is the last
+            }
+
+            memory.add_user_message(user_response)
+            memory.add_assistant_message(confirmation_question)
+
+            return {
+                "messages": [AIMessage(content=confirmation_question)],
+                "awaiting_scenario_selection": True,
+                "scenario_clarification_pending": False,
+                "clarification_state": updated_state,
+            }
+
+        # More than one scenario remains - ask about the next one
+        next_scenario = remaining_scenarios[0]
+        next_question = next_scenario.get(
+            "identifying_question",
+            f"Is your situation related to: {next_scenario.get('title', 'this scenario')}?",
+        )
+
+        # Update clarification state
+        updated_state = {
+            "is_active": True,
+            "attempt_count": attempt_count,
+            "max_attempts": max_attempts,
+            "original_question": original_question,
+            "all_scenarios": all_scenarios,
+            "remaining_scenarios": remaining_scenarios,
+            "eliminated_scenarios": eliminated_scenarios,
+            "user_responses": user_responses,
+            "asked_questions": asked_questions + [next_question],
+            "current_question": next_question,
+            "gathered_context": gathered_context,
+            "current_scenario_id": next_scenario.get("id"),
+            "scenario_question_map": clarification_state.get(
+                "scenario_question_map", {}
+            ),
+        }
+
+        memory.add_user_message(user_response)
+        memory.add_assistant_message(next_question)
+
+        return {
+            "messages": [AIMessage(content=next_question)],
+            "awaiting_scenario_selection": True,
+            "scenario_clarification_pending": False,
+            "clarification_state": updated_state,
+        }
+
+    # ============ HANDLE NON-EXPLICIT RESPONSES (descriptions, partial info, etc.) ============
     try:
         analyzer = get_response_analyzer()
 
@@ -845,7 +1082,7 @@ def process_scenario_selection(state: AgentState) -> dict:
         print(
             f"[ScenarioSelection] Attempt {attempt_count}/{max_attempts}, "
             f"Confidence: {confidence}, Eliminated: {eliminated_ids}, "
-            f"Matched: {matched_id}"
+            f"Matched: {matched_id}, Remaining before filter: {len(remaining_scenarios)}"
         )
 
         # Filter out eliminated scenarios
@@ -853,11 +1090,14 @@ def process_scenario_selection(state: AgentState) -> dict:
             remaining_scenarios = [
                 s for s in remaining_scenarios if s.get("id") not in eliminated_ids
             ]
+            print(
+                f"[ScenarioSelection] After elimination: {len(remaining_scenarios)} scenarios remain"
+            )
 
         # Check if we have a confident match
         if matched_id is not None and confidence >= 0.7:
             matched_scenario = None
-            for s in clarification_state.get("all_scenarios", remaining_scenarios):
+            for s in all_scenarios:
                 if s.get("id") == matched_id:
                     matched_scenario = s
                     break
@@ -880,6 +1120,24 @@ def process_scenario_selection(state: AgentState) -> dict:
 
         # Check if only one scenario remains
         if len(remaining_scenarios) == 1:
+            # Check if this is a confirmation response
+            is_last_confirmation = clarification_state.get(
+                "is_last_scenario_confirmation", False
+            )
+
+            if is_last_confirmation and is_explicit_no:
+                # User said no to the last scenario too - all exhausted
+                clarification_message = get_available_options_message()
+                memory.add_user_message(user_response)
+                memory.add_assistant_message(clarification_message)
+                return {
+                    "messages": [AIMessage(content=clarification_message)],
+                    "awaiting_scenario_selection": False,
+                    "scenario_clarification_pending": False,
+                    "clarification_state": None,
+                }
+
+            # If we got here through elimination (not direct "no"), give the answer
             single_scenario = remaining_scenarios[0]
             final_response = analyzer.generate_final_response(
                 single_scenario, gathered_context
@@ -897,11 +1155,12 @@ def process_scenario_selection(state: AgentState) -> dict:
 
         # Check if no scenarios remain
         if len(remaining_scenarios) == 0:
+            clarification_message = get_available_options_message()
             memory.add_user_message(user_response)
-            memory.add_assistant_message(no_match_response)
+            memory.add_assistant_message(clarification_message)
 
             return {
-                "messages": [AIMessage(content=no_match_response)],
+                "messages": [AIMessage(content=clarification_message)],
                 "awaiting_scenario_selection": False,
                 "scenario_clarification_pending": False,
                 "clarification_state": None,
@@ -909,23 +1168,14 @@ def process_scenario_selection(state: AgentState) -> dict:
 
         # Check if max attempts reached
         if attempt_count >= max_attempts:
-            # Give best guess or give up
-            if remaining_scenarios:
-                # Provide the most likely scenario based on gathered context
-                best_scenario = remaining_scenarios[0]
-                fallback_response = (
-                    f"Based on what you've described, here's what might help:\n\n"
-                    f"{best_scenario.get('solution', 'Please contact support for assistance.')}\n\n"
-                    f"If this doesn't match your situation, please try describing the issue differently."
-                )
-            else:
-                fallback_response = no_match_response
+            # Instead of giving best guess, ask for clarification
+            clarification_message = get_available_options_message()
 
             memory.add_user_message(user_response)
-            memory.add_assistant_message(fallback_response)
+            memory.add_assistant_message(clarification_message)
 
             return {
-                "messages": [AIMessage(content=fallback_response)],
+                "messages": [AIMessage(content=clarification_message)],
                 "awaiting_scenario_selection": False,
                 "scenario_clarification_pending": False,
                 "clarification_state": None,
@@ -936,6 +1186,12 @@ def process_scenario_selection(state: AgentState) -> dict:
             # Use suggested question or generate new one
             if suggested_question and suggested_question not in asked_questions:
                 next_question = suggested_question
+                # Find scenario ID for this question
+                next_scenario_id = None
+                for s in remaining_scenarios:
+                    if s.get("identifying_question") == suggested_question:
+                        next_scenario_id = s.get("id")
+                        break
             else:
                 question_data = analyzer.generate_next_question(
                     remaining_scenarios=remaining_scenarios,
@@ -943,21 +1199,17 @@ def process_scenario_selection(state: AgentState) -> dict:
                     asked_questions=asked_questions,
                 )
                 next_question = question_data.get("question", "")
+                next_scenario_id = None
 
             if not next_question:
-                # Use identifying question from most likely remaining scenario
-                likely_ids = evaluation.get("likely_scenario_ids", [])
-                if likely_ids:
-                    for s in remaining_scenarios:
-                        if s.get("id") in likely_ids:
-                            next_question = s.get("identifying_question", "")
-                            break
-
-                if not next_question and remaining_scenarios:
-                    next_question = remaining_scenarios[0].get(
+                # Use identifying question from first remaining scenario
+                if remaining_scenarios:
+                    next_scenario = remaining_scenarios[0]
+                    next_question = next_scenario.get(
                         "identifying_question",
                         "Could you describe the error in more detail?",
                     )
+                    next_scenario_id = next_scenario.get("id")
 
             # Update clarification state
             updated_state = {
@@ -965,18 +1217,20 @@ def process_scenario_selection(state: AgentState) -> dict:
                 "attempt_count": attempt_count,
                 "max_attempts": max_attempts,
                 "original_question": original_question,
-                "all_scenarios": clarification_state.get(
-                    "all_scenarios", remaining_scenarios
-                ),
+                "all_scenarios": all_scenarios,
                 "remaining_scenarios": remaining_scenarios,
                 "eliminated_scenarios": clarification_state.get(
                     "eliminated_scenarios", []
                 )
                 + eliminated_ids,
                 "user_responses": user_responses,
-                "asked_questions": asked_questions,
+                "asked_questions": asked_questions + [next_question],
                 "current_question": next_question,
                 "gathered_context": gathered_context,
+                "current_scenario_id": next_scenario_id,
+                "scenario_question_map": clarification_state.get(
+                    "scenario_question_map", {}
+                ),
             }
 
             memory.add_user_message(user_response)
@@ -989,12 +1243,13 @@ def process_scenario_selection(state: AgentState) -> dict:
                 "clarification_state": updated_state,
             }
 
-        # Fallback - shouldn't normally reach here
+        # Fallback - ask for clarification
+        clarification_message = get_available_options_message()
         memory.add_user_message(user_response)
-        memory.add_assistant_message(no_match_response)
+        memory.add_assistant_message(clarification_message)
 
         return {
-            "messages": [AIMessage(content=no_match_response)],
+            "messages": [AIMessage(content=clarification_message)],
             "awaiting_scenario_selection": False,
             "scenario_clarification_pending": False,
             "clarification_state": None,
@@ -1006,11 +1261,12 @@ def process_scenario_selection(state: AgentState) -> dict:
 
         traceback.print_exc()
 
+        clarification_message = get_available_options_message()
         memory.add_user_message(user_response)
-        memory.add_assistant_message(no_match_response)
+        memory.add_assistant_message(clarification_message)
 
         return {
-            "messages": [AIMessage(content=no_match_response)],
+            "messages": [AIMessage(content=clarification_message)],
             "awaiting_scenario_selection": False,
             "scenario_clarification_pending": False,
             "clarification_state": None,

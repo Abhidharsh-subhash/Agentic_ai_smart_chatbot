@@ -40,6 +40,9 @@ class ClarificationState(TypedDict):
     asked_questions: List[str]  # Questions we've already asked
     current_question: str
     gathered_context: str  # Accumulated context from user
+    current_scenario_id: Optional[int]
+    scenario_question_map: dict  # Maps scenario ID to its identifying question
+    is_last_scenario_confirmation: bool  # NEW: Flag when asking about the last scenario
 
 
 class ResponseAnalysis(TypedDict):
