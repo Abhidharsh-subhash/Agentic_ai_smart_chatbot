@@ -2,7 +2,7 @@
 import json
 import re
 import random
-from typing import Literal
+from typing import Literal, Dict
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import ToolNode
@@ -41,6 +41,250 @@ analyzer_llm = ChatOpenAI(
 )
 
 llm_with_tools = llm.bind_tools(tools)
+
+# ============================================
+# INLINE CONTEXT ANALYZER (to avoid import issues)
+# ============================================
+
+CONTEXT_ANALYSIS_PROMPT = """Determine if the user is responding to a clarification question OR asking a completely new unrelated question.
+
+CURRENT CLARIFICATION CONTEXT:
+- Original Question: {original_question}
+- Last Clarification Question Asked: {last_question}
+
+USER'S NEW INPUT: "{user_input}"
+
+ANALYSIS RULES:
+
+CLARIFICATION RESPONSE (is_new_question=false):
+- "yes", "no", "nope", "yep", "correct", "that's right", etc.
+- Describing their specific error/situation related to original topic
+- References like "it shows...", "the error says...", "I'm seeing..."
+- Short responses that answer the clarification question
+
+NEW UNRELATED QUESTION (is_new_question=true):
+- Different topic entirely (original was about errors → new is about "how to apply")
+- Questions like "how can I...", "what is...", "how do I...", "can you tell me..."
+- Makes complete sense WITHOUT the previous context
+- Topic shift (troubleshooting → general inquiry)
+
+CRITICAL: "how can i apply for visa" when original question was about "application posting failed" = NEW QUESTION (different topic)
+
+Respond with ONLY valid JSON:
+{{"is_new_question": true/false, "confidence": 0.0-1.0, "reasoning": "brief explanation"}}"""
+
+
+def analyze_if_new_question(
+    user_input: str,
+    original_question: str,
+    last_clarification_question: str,
+) -> Dict:
+    """
+    Determine if user input is a new question or clarification response.
+    Returns dict with is_new_question, confidence, reasoning.
+    """
+    user_lower = user_input.lower().strip()
+
+    print(f"\n{'='*60}")
+    print(f"[ContextAnalyzer] Analyzing input: '{user_input}'")
+    print(f"[ContextAnalyzer] Original question: '{original_question}'")
+    print(f"[ContextAnalyzer] Last clarification: '{last_clarification_question}'")
+    print(f"{'='*60}")
+
+    # ===== FAST PATH: Obvious clarification responses =====
+    obvious_clarification = {
+        "yes",
+        "no",
+        "nope",
+        "yep",
+        "yeah",
+        "yup",
+        "correct",
+        "that's right",
+        "not that",
+        "neither",
+        "none",
+        "both",
+        "all of them",
+        "the first one",
+        "the second one",
+        "option 1",
+        "option 2",
+        "n",
+        "y",
+        "ok",
+        "okay",
+        "right",
+        "exactly",
+        "affirmative",
+        "negative",
+        "not really",
+        "sort of",
+    }
+
+    # Check for exact matches first
+    if user_lower in obvious_clarification:
+        print(f"[ContextAnalyzer] FAST PATH: Obvious clarification '{user_lower}'")
+        return {
+            "is_new_question": False,
+            "confidence": 0.95,
+            "reasoning": f"Obvious clarification response: '{user_lower}'",
+        }
+
+    # ===== FAST PATH: Obvious new question patterns =====
+    new_question_starters = [
+        "how can i",
+        "how do i",
+        "how to",
+        "what is",
+        "what are",
+        "can you tell me",
+        "can you explain",
+        "i want to know",
+        "tell me about",
+        "explain",
+        "help me with",
+        "what about",
+        "i need to",
+        "i want to",
+        "can i",
+        "could you",
+        "would you",
+        "where can i",
+        "when can i",
+        "who can",
+        "why is",
+        "why do",
+    ]
+
+    for starter in new_question_starters:
+        if user_lower.startswith(starter):
+            # Additional check: is this about a completely different topic?
+            original_keywords = set(original_question.lower().split())
+            input_keywords = set(user_lower.split())
+
+            # Remove common words
+            common_words = {
+                "the",
+                "a",
+                "an",
+                "is",
+                "are",
+                "was",
+                "were",
+                "i",
+                "my",
+                "for",
+                "to",
+                "can",
+                "how",
+                "what",
+                "do",
+            }
+            original_keywords -= common_words
+            input_keywords -= common_words
+
+            overlap = original_keywords & input_keywords
+            overlap_ratio = len(overlap) / max(len(input_keywords), 1)
+
+            print(f"[ContextAnalyzer] FAST PATH: New question pattern '{starter}'")
+            print(
+                f"[ContextAnalyzer] Keyword overlap: {overlap}, ratio: {overlap_ratio:.2f}"
+            )
+
+            # Low overlap = definitely new question
+            if overlap_ratio < 0.3:
+                print(f"[ContextAnalyzer] ✅ DETECTED AS NEW QUESTION (low overlap)")
+                return {
+                    "is_new_question": True,
+                    "confidence": 0.9,
+                    "reasoning": f"New question pattern '{starter}' with low topic overlap ({overlap_ratio:.2f})",
+                }
+
+    # ===== LLM PATH: Ambiguous cases =====
+    print(f"[ContextAnalyzer] Using LLM for ambiguous case...")
+
+    try:
+        prompt = CONTEXT_ANALYSIS_PROMPT.format(
+            original_question=original_question,
+            last_question=last_clarification_question,
+            user_input=user_input,
+        )
+
+        result = analyzer_llm.invoke([SystemMessage(content=prompt)])
+        response_text = result.content.strip()
+
+        print(f"[ContextAnalyzer] LLM response: {response_text[:200]}")
+
+        # Parse JSON
+        analysis = _extract_json_from_text(response_text)
+
+        is_new = analysis.get("is_new_question", False)
+        confidence = analysis.get("confidence", 0.5)
+        reasoning = analysis.get("reasoning", "LLM analysis")
+
+        print(f"[ContextAnalyzer] LLM result: is_new={is_new}, confidence={confidence}")
+
+        return {
+            "is_new_question": is_new,
+            "confidence": confidence,
+            "reasoning": reasoning,
+        }
+
+    except Exception as e:
+        print(f"[ContextAnalyzer] LLM ERROR: {e}")
+        import traceback
+
+        traceback.print_exc()
+
+        # Fallback: if it looks like a question and is long, probably new
+        if "?" in user_input or len(user_input.split()) > 5:
+            print(f"[ContextAnalyzer] FALLBACK: Treating as new question")
+            return {
+                "is_new_question": True,
+                "confidence": 0.6,
+                "reasoning": "Fallback: looks like a question",
+            }
+
+        return {
+            "is_new_question": False,
+            "confidence": 0.5,
+            "reasoning": "Fallback: treating as clarification",
+        }
+
+
+def _extract_json_from_text(text: str) -> Dict:
+    """Extract JSON from LLM response."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try markdown blocks
+    for pattern in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                return json.loads(match.group(1).strip())
+            except:
+                continue
+
+    # Find JSON object
+    brace_start = text.find("{")
+    if brace_start != -1:
+        brace_count = 0
+        for i, char in enumerate(text[brace_start:], brace_start):
+            if char == "{":
+                brace_count += 1
+            elif char == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    try:
+                        return json.loads(text[brace_start : i + 1])
+                    except:
+                        break
+
+    return {"is_new_question": False, "confidence": 0.5}
 
 
 # ============================================
@@ -223,6 +467,9 @@ def get_response_analyzer():
 # ============================================
 
 
+# app/services/rag/nodes.py
+
+
 def analyze_input(state: AgentState) -> dict:
     """Analyze user input for intent and clarity."""
     messages = state["messages"]
@@ -243,9 +490,16 @@ def analyze_input(state: AgentState) -> dict:
 
     memory = memory_manager.get_or_create(session_id)
 
-    # Check if we're in active clarification flow
+    print(f"\n[AnalyzeInput] Processing: '{user_message}'")
+
+    # Check if in clarification flow
     clarification_state = state.get("clarification_state")
+    awaiting_scenario = state.get("awaiting_scenario_selection", False)
+
+    # If clarification_state exists and is active, continue clarification flow
+    # (New question detection happens BEFORE this in ChatbotService)
     if clarification_state and clarification_state.get("is_active", False):
+        print(f"[AnalyzeInput] Continuing clarification flow")
         return {
             "interaction_mode": InteractionMode.QUERY.value,
             "clarification_needed": False,
@@ -255,8 +509,9 @@ def analyze_input(state: AgentState) -> dict:
             "last_user_query": clarification_state.get("original_question", ""),
         }
 
-    # Check if awaiting scenario selection (backwards compatibility)
-    if state.get("awaiting_scenario_selection", False):
+    # Legacy check for awaiting_scenario_selection
+    if awaiting_scenario:
+        print(f"[AnalyzeInput] Continuing clarification flow (legacy)")
         return {
             "interaction_mode": InteractionMode.QUERY.value,
             "clarification_needed": False,
@@ -266,6 +521,7 @@ def analyze_input(state: AgentState) -> dict:
             "last_user_query": state.get("original_query", ""),
         }
 
+    # === Normal flow ===
     is_follow_up = memory.is_likely_follow_up(user_message)
     last_user = memory.get_last_user_query()
     last_assistant = memory.get_last_assistant_response()
@@ -290,7 +546,7 @@ def analyze_input(state: AgentState) -> dict:
             "clarification_state": None,
         }
 
-    # Handle pending clarification (vague query)
+    # Handle pending vague query clarification
     if state.get("pending_clarification", False):
         return {
             "clarification_needed": False,
@@ -1324,26 +1580,51 @@ def route_after_analysis(
 ]:
     """Route based on analysis results."""
 
-    # Check if user is responding to scenario clarification
+    print(f"\n[RouteAfterAnalysis] Making routing decision...")
+    print(
+        f"[RouteAfterAnalysis] scenario_clarification_pending: {state.get('scenario_clarification_pending', False)}"
+    )
+    print(
+        f"[RouteAfterAnalysis] awaiting_scenario_selection: {state.get('awaiting_scenario_selection', False)}"
+    )
+    print(
+        f"[RouteAfterAnalysis] clarification_state: {state.get('clarification_state') is not None}"
+    )
+    print(f"[RouteAfterAnalysis] interaction_mode: {state.get('interaction_mode')}")
+
+    # Check if we should process scenario selection
     if state.get("scenario_clarification_pending", False):
-        return "process_scenario_selection"
+        clarification_state = state.get("clarification_state")
+        if clarification_state and clarification_state.get("is_active", False):
+            print(f"[RouteAfterAnalysis] ➡️  Routing to process_scenario_selection")
+            return "process_scenario_selection"
+        elif state.get("awaiting_scenario_selection", False):
+            print(
+                f"[RouteAfterAnalysis] ➡️  Routing to process_scenario_selection (legacy)"
+            )
+            return "process_scenario_selection"
 
     mode = state.get("interaction_mode", InteractionMode.QUERY.value)
 
     if mode == InteractionMode.GREETING.value:
+        print(f"[RouteAfterAnalysis] ➡️  Routing to handle_greeting")
         return "handle_greeting"
 
     if mode == InteractionMode.CLOSING.value:
+        print(f"[RouteAfterAnalysis] ➡️  Routing to handle_closing")
         return "handle_closing"
 
     if mode == "document_listing":
+        print(f"[RouteAfterAnalysis] ➡️  Routing to handle_document_listing")
         return "handle_document_listing"
 
     if state.get("clarification_needed", False):
         attempts = state.get("clarification_attempts", 0)
         if attempts < 2:
+            print(f"[RouteAfterAnalysis] ➡️  Routing to ask_clarification")
             return "ask_clarification"
 
+    print(f"[RouteAfterAnalysis] ➡️  Routing to think_and_plan (new question)")
     return "think_and_plan"
 
 

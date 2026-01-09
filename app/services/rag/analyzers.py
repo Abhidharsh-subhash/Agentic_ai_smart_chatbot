@@ -329,7 +329,245 @@ class HallucinationDetector:
 # ============================================
 
 
-# Replace ResponseScenarioAnalyzer in analyzers.py
+# app/services/rag/analyzers.py
+
+# ... existing code ...
+
+
+class ClarificationContextAnalyzer:
+    """
+    Analyzes if user input is a clarification response or a new unrelated question.
+    Uses LLM to make intelligent context-aware decisions.
+    """
+
+    CONTEXT_ANALYSIS_PROMPT = """You are analyzing a conversation to determine if the user is responding to a clarification question or asking a completely new question.
+
+CURRENT CONVERSATION CONTEXT:
+- Original Question: {original_question}
+- Last Clarification Question Asked: {last_question}
+- Topic Being Discussed: {topics}
+
+USER'S NEW INPUT:
+"{user_input}"
+
+TASK: Determine if the user's input is:
+1. A RESPONSE to the clarification question (answering yes/no, describing their situation, providing details about the original topic)
+2. A NEW QUESTION that is unrelated to the current clarification flow
+
+IMPORTANT INDICATORS:
+
+For CLARIFICATION RESPONSE (is_clarification_response=true):
+- Short answers like "yes", "no", "nope", "correct", "that's right"
+- Descriptions of their specific situation related to the original question
+- References to errors, issues, or problems mentioned in the original question
+- Elaborations on the same topic
+- "It says...", "I'm seeing...", "The error shows..."
+
+For NEW QUESTION (is_new_question=true):
+- Completely different topics (e.g., original was about errors, new is about how to apply)
+- Questions starting with "how do I...", "what is...", "can you tell me about...", "how can I..."
+- Questions that make sense on their own without the previous context
+- Topic shifts that don't relate to the current problem
+- General inquiries unrelated to troubleshooting the original issue
+
+Respond with ONLY a JSON object (no markdown, no explanation):
+{{"is_clarification_response": true/false, "is_new_question": true/false, "confidence": 0.0-1.0, "reasoning": "brief explanation", "detected_intent": "clarification_response" or "new_question"}}"""
+
+    def __init__(self, llm=None):
+        self._llm = llm
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            from langchain_openai import ChatOpenAI
+            from app.core.config import settings
+
+            self._llm = ChatOpenAI(
+                model=getattr(settings, "openai_model", "gpt-4o"),
+                temperature=0.0,
+                openai_api_key=settings.openai_api_key,
+            )
+        return self._llm
+
+    def analyze_input_context(
+        self,
+        user_input: str,
+        original_question: str,
+        last_clarification_question: str,
+        topics: List[str] = None,
+    ) -> Dict:
+        """
+        Analyze if user input is a clarification response or new question.
+
+        Returns:
+            Dict with:
+            - is_clarification_response: bool
+            - is_new_question: bool
+            - confidence: float (0-1)
+            - reasoning: str
+            - detected_intent: str
+        """
+        from langchain_core.messages import SystemMessage
+
+        # Quick check for obvious cases to save LLM calls
+        user_lower = user_input.lower().strip()
+
+        # Obvious clarification responses
+        obvious_clarification = [
+            "yes",
+            "no",
+            "nope",
+            "yep",
+            "yeah",
+            "correct",
+            "that's right",
+            "not that",
+            "neither",
+            "none",
+            "both",
+            "all of them",
+            "the first one",
+            "the second one",
+            "option 1",
+            "option 2",
+            "n",
+            "y",
+        ]
+
+        if user_lower in obvious_clarification:
+            return {
+                "is_clarification_response": True,
+                "is_new_question": False,
+                "confidence": 0.95,
+                "reasoning": "Obvious clarification response (yes/no pattern)",
+                "detected_intent": "clarification_response",
+            }
+
+        # Use LLM for nuanced cases
+        prompt = self.CONTEXT_ANALYSIS_PROMPT.format(
+            original_question=original_question,
+            last_question=last_clarification_question,
+            topics=", ".join(topics) if topics else "Not specified",
+            user_input=user_input,
+        )
+
+        try:
+            result = self.llm.invoke([SystemMessage(content=prompt)])
+            analysis = self._extract_json(result.content.strip())
+
+            # Set defaults
+            analysis.setdefault("is_clarification_response", False)
+            analysis.setdefault("is_new_question", True)
+            analysis.setdefault("confidence", 0.5)
+            analysis.setdefault("detected_intent", "new_question")
+            analysis.setdefault("reasoning", "")
+
+            # Ensure mutual exclusivity
+            if analysis["is_clarification_response"] and analysis["is_new_question"]:
+                # If both are true, go with higher confidence option
+                analysis["is_new_question"] = analysis["confidence"] < 0.5
+                analysis["is_clarification_response"] = analysis["confidence"] >= 0.5
+
+            return analysis
+
+        except Exception as e:
+            print(f"[ClarificationContextAnalyzer] Error: {e}")
+            # Fallback heuristics
+            return self._fallback_analysis(user_input, original_question)
+
+    def _fallback_analysis(self, user_input: str, original_question: str) -> Dict:
+        """Fallback heuristics when LLM fails."""
+        user_lower = user_input.lower().strip()
+
+        # Check for question patterns that indicate new questions
+        new_question_patterns = [
+            "how can i",
+            "how do i",
+            "how to",
+            "what is",
+            "what are",
+            "can you tell me",
+            "can you explain",
+            "i want to",
+            "i need to",
+            "tell me about",
+            "explain",
+            "help me with",
+        ]
+
+        for pattern in new_question_patterns:
+            if user_lower.startswith(pattern):
+                return {
+                    "is_clarification_response": False,
+                    "is_new_question": True,
+                    "confidence": 0.7,
+                    "reasoning": f"Input starts with new question pattern: '{pattern}'",
+                    "detected_intent": "new_question",
+                }
+
+        # Check if input contains question marks (likely a new question)
+        if "?" in user_input and len(user_input.split()) > 5:
+            return {
+                "is_clarification_response": False,
+                "is_new_question": True,
+                "confidence": 0.6,
+                "reasoning": "Input contains question mark and is longer than typical clarification",
+                "detected_intent": "new_question",
+            }
+
+        # Short responses are likely clarifications
+        if len(user_input.split()) <= 3:
+            return {
+                "is_clarification_response": True,
+                "is_new_question": False,
+                "confidence": 0.6,
+                "reasoning": "Short response, likely clarification",
+                "detected_intent": "clarification_response",
+            }
+
+        # Default to clarification for medium-length responses
+        return {
+            "is_clarification_response": True,
+            "is_new_question": False,
+            "confidence": 0.5,
+            "reasoning": "Fallback - treating as clarification",
+            "detected_intent": "clarification_response",
+        }
+
+    def _extract_json(self, text: str) -> Dict:
+        """Extract JSON from response."""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        for pattern in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    return json.loads(match.group(1).strip())
+                except:
+                    continue
+
+        brace_start = text.find("{")
+        if brace_start != -1:
+            brace_count = 0
+            for i, char in enumerate(text[brace_start:], brace_start):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        try:
+                            return json.loads(text[brace_start : i + 1])
+                        except:
+                            break
+
+        raise ValueError(f"No JSON found: {text[:100]}")
+
+
+# Create singleton instance
+clarification_context_analyzer = ClarificationContextAnalyzer()
 
 
 class ResponseScenarioAnalyzer:
