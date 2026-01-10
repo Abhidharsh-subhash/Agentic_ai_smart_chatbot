@@ -1,4 +1,5 @@
 # app/services/rag/graph.py
+
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -15,19 +16,14 @@ from .nodes import (
     validate_search_results,
     handle_not_found,
     save_to_memory,
-    # New nodes
     analyze_response_scenarios,
     ask_scenario_clarification,
     process_scenario_selection,
-    # Routing functions
     should_continue,
     route_after_analysis,
     route_after_validation,
     route_after_scenario_analysis,
 )
-
-
-# In graph.py - ensure this routing exists
 
 
 def create_rag_graph():
@@ -53,7 +49,7 @@ def create_rag_graph():
     # Entry
     workflow.add_edge(START, "analyze_input")
 
-    # Route after input
+    # Route after input analysis
     workflow.add_conditional_edges(
         "analyze_input",
         route_after_analysis,
@@ -103,5 +99,6 @@ def create_rag_graph():
         },
     )
 
+    # Each invocation is stateless - we manage state in ChatbotService
     memory = MemorySaver()
     return workflow.compile(checkpointer=memory)

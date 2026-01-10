@@ -457,17 +457,9 @@ def extract_json_from_response(response_text: str) -> dict:
     raise ValueError(f"Could not extract JSON from: {text[:200]}")
 
 
-def get_response_analyzer():
-    """Get or create the response scenario analyzer."""
-    return ResponseScenarioAnalyzer(llm=analyzer_llm)
-
-
 # ============================================
 # NODE FUNCTIONS
 # ============================================
-
-
-# app/services/rag/nodes.py
 
 
 def analyze_input(state: AgentState) -> dict:
@@ -491,40 +483,46 @@ def analyze_input(state: AgentState) -> dict:
     memory = memory_manager.get_or_create(session_id)
 
     print(f"\n[AnalyzeInput] Processing: '{user_message}'")
+    print(
+        f"[AnalyzeInput] awaiting_scenario_selection: {state.get('awaiting_scenario_selection', False)}"
+    )
+    print(
+        f"[AnalyzeInput] scenario_clarification_pending: {state.get('scenario_clarification_pending', False)}"
+    )
+    print(
+        f"[AnalyzeInput] clarification_state: {state.get('clarification_state') is not None}"
+    )
 
-    # Check if in clarification flow
-    clarification_state = state.get("clarification_state")
-    awaiting_scenario = state.get("awaiting_scenario_selection", False)
+    # ===== CHECK FOR ACTIVE CLARIFICATION FLOW =====
+    # Check BOTH flags - the state might come from ChatbotService
+    if state.get("awaiting_scenario_selection", False) or state.get(
+        "scenario_clarification_pending", False
+    ):
+        clarification_state = state.get("clarification_state")
 
-    # If clarification_state exists and is active, continue clarification flow
-    # (New question detection happens BEFORE this in ChatbotService)
-    if clarification_state and clarification_state.get("is_active", False):
-        print(f"[AnalyzeInput] Continuing clarification flow")
-        return {
-            "interaction_mode": InteractionMode.QUERY.value,
-            "clarification_needed": False,
-            "is_follow_up_question": True,
-            "user_scenario_context": user_message,
-            "scenario_clarification_pending": True,
-            "last_user_query": clarification_state.get("original_question", ""),
-        }
+        if clarification_state and clarification_state.get("is_active", False):
+            print(f"[AnalyzeInput] ✅ CONTINUING CLARIFICATION FLOW")
+            print(
+                f"[AnalyzeInput]   - Remaining scenarios: {len(clarification_state.get('remaining_scenarios', []))}"
+            )
+            print(
+                f"[AnalyzeInput]   - Attempt: {clarification_state.get('attempt_count', 0)}"
+            )
 
-    # Legacy check for awaiting_scenario_selection
-    if awaiting_scenario:
-        print(f"[AnalyzeInput] Continuing clarification flow (legacy)")
-        return {
-            "interaction_mode": InteractionMode.QUERY.value,
-            "clarification_needed": False,
-            "is_follow_up_question": True,
-            "user_scenario_context": user_message,
-            "scenario_clarification_pending": True,
-            "last_user_query": state.get("original_query", ""),
-        }
+            return {
+                "interaction_mode": InteractionMode.QUERY.value,
+                "clarification_needed": False,
+                "is_follow_up_question": True,
+                "user_scenario_context": user_message,
+                "scenario_clarification_pending": True,
+                "last_user_query": clarification_state.get("original_question", ""),
+                # PRESERVE these from input state
+                "awaiting_scenario_selection": True,
+                "clarification_state": clarification_state,
+            }
 
-    # === Normal flow ===
-    is_follow_up = memory.is_likely_follow_up(user_message)
-    last_user = memory.get_last_user_query()
-    last_assistant = memory.get_last_assistant_response()
+    # ===== NORMAL FLOW (No active clarification) =====
+    print(f"[AnalyzeInput] Processing as NEW question")
 
     # Check for greetings
     if QueryAnalyzer.is_greeting(user_message):
@@ -533,6 +531,7 @@ def analyze_input(state: AgentState) -> dict:
             "clarification_needed": False,
             "is_follow_up_question": False,
             "awaiting_scenario_selection": False,
+            "scenario_clarification_pending": False,
             "clarification_state": None,
         }
 
@@ -543,24 +542,17 @@ def analyze_input(state: AgentState) -> dict:
             "clarification_needed": False,
             "is_follow_up_question": False,
             "awaiting_scenario_selection": False,
+            "scenario_clarification_pending": False,
             "clarification_state": None,
-        }
-
-    # Handle pending vague query clarification
-    if state.get("pending_clarification", False):
-        return {
-            "clarification_needed": False,
-            "pending_clarification": False,
-            "interaction_mode": InteractionMode.QUERY.value,
-            "is_follow_up_question": True,
-            "last_user_query": last_user or "",
-            "last_assistant_response": last_assistant or "",
-            "awaiting_scenario_selection": False,
         }
 
     # Analyze query clarity
     analysis = QueryAnalyzer.analyze(user_message, context)
     needs_clarification = not analysis["is_clear"] and analysis["confidence"] < 0.3
+
+    is_follow_up = memory.is_likely_follow_up(user_message)
+    last_user = memory.get_last_user_query()
+    last_assistant = memory.get_last_assistant_response()
 
     return {
         "clarification_needed": needs_clarification,
@@ -577,6 +569,7 @@ def analyze_input(state: AgentState) -> dict:
         "is_follow_up_question": is_follow_up,
         "last_user_query": last_user or "",
         "last_assistant_response": last_assistant or "",
+        # Explicitly set these to False for new questions
         "awaiting_scenario_selection": False,
         "scenario_clarification_pending": False,
         "clarification_state": None,
@@ -1568,6 +1561,9 @@ def should_continue(state: AgentState) -> Literal["tools", "analyze_scenarios"]:
     return "analyze_scenarios"
 
 
+# app/services/rag/nodes.py - Update routing function
+
+
 def route_after_analysis(
     state: AgentState,
 ) -> Literal[
@@ -1582,49 +1578,46 @@ def route_after_analysis(
 
     print(f"\n[RouteAfterAnalysis] Making routing decision...")
     print(
-        f"[RouteAfterAnalysis] scenario_clarification_pending: {state.get('scenario_clarification_pending', False)}"
+        f"  - scenario_clarification_pending: {state.get('scenario_clarification_pending', False)}"
     )
     print(
-        f"[RouteAfterAnalysis] awaiting_scenario_selection: {state.get('awaiting_scenario_selection', False)}"
+        f"  - awaiting_scenario_selection: {state.get('awaiting_scenario_selection', False)}"
     )
     print(
-        f"[RouteAfterAnalysis] clarification_state: {state.get('clarification_state') is not None}"
+        f"  - clarification_state exists: {state.get('clarification_state') is not None}"
     )
-    print(f"[RouteAfterAnalysis] interaction_mode: {state.get('interaction_mode')}")
+    print(f"  - interaction_mode: {state.get('interaction_mode')}")
 
-    # Check if we should process scenario selection
-    if state.get("scenario_clarification_pending", False):
+    # ===== PRIORITY: Check for scenario clarification first =====
+    if state.get("scenario_clarification_pending", False) or state.get(
+        "awaiting_scenario_selection", False
+    ):
         clarification_state = state.get("clarification_state")
         if clarification_state and clarification_state.get("is_active", False):
-            print(f"[RouteAfterAnalysis] ➡️  Routing to process_scenario_selection")
-            return "process_scenario_selection"
-        elif state.get("awaiting_scenario_selection", False):
-            print(
-                f"[RouteAfterAnalysis] ➡️  Routing to process_scenario_selection (legacy)"
-            )
+            print(f"[RouteAfterAnalysis] ➡️ ROUTING TO process_scenario_selection")
             return "process_scenario_selection"
 
     mode = state.get("interaction_mode", InteractionMode.QUERY.value)
 
     if mode == InteractionMode.GREETING.value:
-        print(f"[RouteAfterAnalysis] ➡️  Routing to handle_greeting")
+        print(f"[RouteAfterAnalysis] ➡️ Routing to handle_greeting")
         return "handle_greeting"
 
     if mode == InteractionMode.CLOSING.value:
-        print(f"[RouteAfterAnalysis] ➡️  Routing to handle_closing")
+        print(f"[RouteAfterAnalysis] ➡️ Routing to handle_closing")
         return "handle_closing"
 
     if mode == "document_listing":
-        print(f"[RouteAfterAnalysis] ➡️  Routing to handle_document_listing")
+        print(f"[RouteAfterAnalysis] ➡️ Routing to handle_document_listing")
         return "handle_document_listing"
 
     if state.get("clarification_needed", False):
         attempts = state.get("clarification_attempts", 0)
         if attempts < 2:
-            print(f"[RouteAfterAnalysis] ➡️  Routing to ask_clarification")
+            print(f"[RouteAfterAnalysis] ➡️ Routing to ask_clarification")
             return "ask_clarification"
 
-    print(f"[RouteAfterAnalysis] ➡️  Routing to think_and_plan (new question)")
+    print(f"[RouteAfterAnalysis] ➡️ Routing to think_and_plan")
     return "think_and_plan"
 
 
