@@ -1,52 +1,43 @@
 # app/services/rag/graph.py
-
+"""
+Graph definition - matching standalone exactly.
+"""
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
 from .state import AgentState
 from .nodes import (
     analyze_input,
-    think_and_plan,
     handle_greeting,
     handle_closing,
-    handle_document_listing,
     ask_clarification,
     agent,
     tool_node,
-    validate_search_results,
+    validate_and_route,
     handle_not_found,
-    save_to_memory,
-    analyze_response_scenarios,
-    ask_scenario_clarification,
-    process_scenario_selection,
+    present_scenarios,
     should_continue,
     route_after_analysis,
     route_after_validation,
-    route_after_scenario_analysis,
 )
 
 
-def create_rag_graph():
-    """Create and compile the RAG agent graph."""
+def create_agent():
+    """Create and compile the agent graph."""
     workflow = StateGraph(AgentState)
 
     # Add nodes
     workflow.add_node("analyze_input", analyze_input)
-    workflow.add_node("think_and_plan", think_and_plan)
     workflow.add_node("handle_greeting", handle_greeting)
     workflow.add_node("handle_closing", handle_closing)
-    workflow.add_node("handle_document_listing", handle_document_listing)
     workflow.add_node("ask_clarification", ask_clarification)
     workflow.add_node("agent", agent)
     workflow.add_node("tools", tool_node)
-    workflow.add_node("validate_search", validate_search_results)
+    workflow.add_node("validate_and_route", validate_and_route)
     workflow.add_node("handle_not_found", handle_not_found)
-    workflow.add_node("analyze_scenarios", analyze_response_scenarios)
-    workflow.add_node("ask_scenario_clarification", ask_scenario_clarification)
-    workflow.add_node("process_scenario_selection", process_scenario_selection)
-    workflow.add_node("save_memory", save_to_memory)
+    workflow.add_node("present_scenarios", present_scenarios)
 
-    # Entry
+    # Entry point
     workflow.add_edge(START, "analyze_input")
 
     # Route after input analysis
@@ -56,49 +47,38 @@ def create_rag_graph():
         {
             "handle_greeting": "handle_greeting",
             "handle_closing": "handle_closing",
-            "handle_document_listing": "handle_document_listing",
             "ask_clarification": "ask_clarification",
-            "think_and_plan": "think_and_plan",
-            "process_scenario_selection": "process_scenario_selection",
+            "agent": "agent",
         },
     )
-
-    workflow.add_edge("think_and_plan", "agent")
 
     # Terminal nodes
     workflow.add_edge("handle_greeting", END)
     workflow.add_edge("handle_closing", END)
-    workflow.add_edge("handle_document_listing", END)
     workflow.add_edge("ask_clarification", END)
     workflow.add_edge("handle_not_found", END)
-    workflow.add_edge("save_memory", END)
-    workflow.add_edge("ask_scenario_clarification", END)
-    workflow.add_edge("process_scenario_selection", END)
+    workflow.add_edge("present_scenarios", END)
 
-    # Agent flow
+    # Agent -> tools or end
     workflow.add_conditional_edges(
         "agent",
         should_continue,
-        {"tools": "tools", "analyze_scenarios": "analyze_scenarios"},
+        {"tools": "tools", "end": END},
     )
 
-    workflow.add_edge("tools", "validate_search")
+    # Tools -> Validate
+    workflow.add_edge("tools", "validate_and_route")
 
+    # Validate -> route appropriately
     workflow.add_conditional_edges(
-        "validate_search",
+        "validate_and_route",
         route_after_validation,
-        {"handle_not_found": "handle_not_found", "agent": "agent"},
-    )
-
-    workflow.add_conditional_edges(
-        "analyze_scenarios",
-        route_after_scenario_analysis,
         {
-            "ask_scenario_clarification": "ask_scenario_clarification",
-            "save_memory": "save_memory",
+            "handle_not_found": "handle_not_found",
+            "present_scenarios": "present_scenarios",
+            "agent": "agent",
         },
     )
 
-    # Each invocation is stateless - we manage state in ChatbotService
     memory = MemorySaver()
     return workflow.compile(checkpointer=memory)

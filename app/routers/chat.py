@@ -1,9 +1,9 @@
+# app/routers/chat.py
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from datetime import datetime
 import uuid
 
-from app.services.rag import get_chatbot_service
-from app.services.rag.chatbot import session_manager
+from app.services.rag import get_chatbot_service, session_manager
 
 router = APIRouter(prefix="/ws", tags=["Chat"])
 
@@ -13,14 +13,14 @@ async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for RAG-based chat."""
     await websocket.accept()
 
-    # Create unique session ID for this connection
-    session_id = f"ws_{uuid.uuid4().hex[:8]}_{datetime.now().timestamp()}"
+    # Create unique session ID
+    session_id = f"ws_{uuid.uuid4().hex[:8]}_{int(datetime.now().timestamp())}"
 
-    # Get chatbot service for this session
+    # Get chatbot service
     chatbot = get_chatbot_service(session_id)
 
     try:
-        # Send welcome message
+        # Welcome message
         await websocket.send_json(
             {
                 "type": "connected",
@@ -30,10 +30,8 @@ async def websocket_chat(websocket: WebSocket):
         )
 
         while True:
-            # Receive JSON data from client
+            # Receive message
             data = await websocket.receive_json()
-
-            # Extract the question
             question = data.get("question")
 
             if question is None:
@@ -42,7 +40,6 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
 
-            # Validate question
             if not question.strip():
                 await websocket.send_json(
                     {"type": "error", "error": "Question cannot be empty"}
@@ -50,10 +47,9 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             try:
-                # Get response from chatbot (async)
+                # Get response
                 answer = await chatbot.chat(question)
 
-                # Send response
                 await websocket.send_json(
                     {
                         "type": "answer",
@@ -73,7 +69,6 @@ async def websocket_chat(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print(f"Client disconnected: {session_id}")
-        # Clean up session
         session_manager.remove(session_id)
 
     except Exception as e:

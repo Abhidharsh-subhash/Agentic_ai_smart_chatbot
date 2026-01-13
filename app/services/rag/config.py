@@ -1,8 +1,9 @@
+# app/services/rag/config.py
 from enum import Enum
 
 
 class Config:
-    """Configuration constants for RAG pipeline."""
+    """Configuration constants - matching standalone logic exactly."""
 
     # Confidence thresholds
     HIGH_CONFIDENCE_THRESHOLD = 0.7
@@ -10,18 +11,21 @@ class Config:
     LOW_CONFIDENCE_THRESHOLD = 0.2
 
     # Score thresholds (lower is better for FAISS L2 distance)
-    EXCELLENT_SCORE = 0.6
-    GOOD_SCORE = 0.85
-    ACCEPTABLE_SCORE = 1.2
+    EXCELLENT_SCORE = 0.5
+    GOOD_SCORE = 0.7
+    ACCEPTABLE_SCORE = 1.0
+    NOT_FOUND_SCORE_THRESHOLD = 1.2
 
-    # If best score is above this, consider it "not found"
-    NOT_FOUND_SCORE_THRESHOLD = 1.
-
-    # Minimum number of relevant results needed
+    # Minimum relevant results
     MIN_RELEVANT_RESULTS = 1
 
-    # Search settings
-    DEFAULT_NUM_RESULTS = 10
+    # Scenario settings
+    MIN_SCENARIOS_FOR_DISAMBIGUATION = 2
+    MAX_SCENARIOS_TO_SHOW = 5
+
+    # Redis
+    REDIS_SESSION_PREFIX = "chat:session"
+    REDIS_TTL_SECONDS = 86400 * 7
 
 
 class SearchQuality(str, Enum):
@@ -38,3 +42,11 @@ class InteractionMode(str, Enum):
     CLARIFICATION = "clarification"
     NOT_FOUND = "not_found"
     CLOSING = "closing"
+    DISAMBIGUATION = "disambiguation"
+
+
+class ScenarioStatus(str, Enum):
+    SINGLE = "single"
+    MULTIPLE = "multiple"
+    NONE = "none"
+    RESOLVED = "resolved"
