@@ -1,6 +1,6 @@
 # app/services/rag/nodes.py
 """
-Node functions - matching standalone logic exactly.
+Node functions - matching standalone agentic_ai_logic.py EXACTLY.
 """
 import json
 import random
@@ -15,7 +15,6 @@ from app.core.config import settings
 from .state import AgentState
 from .config import Config, InteractionMode, SearchQuality, ScenarioStatus
 from .tools import tools
-from .memory import memory_manager
 
 
 # ==================== LLM Setup ====================
@@ -31,7 +30,7 @@ llm_with_tools = llm.bind_tools(tools)
 tool_node = ToolNode(tools)
 
 
-# ==================== System Prompt - Matching Standalone ====================
+# ==================== System Prompt - EXACT copy from standalone ====================
 
 SYSTEM_PROMPT = """You are a highly specialized document-based support assistant. Your SOLE purpose is to provide information by STRICTLY and ONLY extracting or directly quoting content from the search results provided.
 
@@ -73,25 +72,20 @@ After getting results from `search_and_analyze` or `get_scenario_answer` (these 
 1. **NEVER ask for clarification BEFORE searching.**
 2. **NEVER speculate about scenarios that might exist; only present what tools explicitly report.**
 3. **ONLY use information EXPLICITLY stated in the provided tool output's `documents` content for answers.**
+   - Refer to the "ABSOLUTELY DO NOT" section above for detailed prohibitions.
+   - If information is not in the documents, state its absence.
 4. **If content is NOT found, say so clearly and briefly.**
-5. **DO NOT mention "documents", "search results", "knowledge base" etc. when giving an answer.** Just provide the extracted information naturally.
+5. **DO NOT mention "documents", "search results", "knowledge base", "according to the documents", "based on my information" etc. when giving an answer.** Just provide the extracted information naturally, but strictly from the source.
 6. When asking for clarification (only for disambiguation), be direct and clear.
-7. Maintain a neutral, factual, and objective tone."""
+7. Maintain a neutral, factual, and objective tone.
+"""
 
 
-# ==================== Helper Functions ====================
-
-
-def get_user_message(messages) -> str:
-    """Extract latest user message."""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            return msg.content
-    return ""
+# ==================== Helper Classes - EXACT copy from standalone ====================
 
 
 class QueryAnalyzer:
-    """Simple query analyzer."""
+    """Analyzes user queries - simplified to avoid premature clarification."""
 
     @classmethod
     def is_greeting(cls, query: str) -> bool:
@@ -128,6 +122,7 @@ class QueryAnalyzer:
 
     @classmethod
     def is_too_short(cls, query: str) -> bool:
+        """Check if query is too short to be meaningful."""
         return len(query.strip()) < 3
 
     @classmethod
@@ -140,44 +135,36 @@ class QueryAnalyzer:
 
         query_lower = query.lower().strip()
 
-        # Numeric selection (1, 2, 3, etc.)
+        # Check for numeric selection (1, 2, 3, etc.)
         if query_lower.isdigit():
             idx = int(query_lower) - 1
             if 0 <= idx < len(available_options):
                 return available_options[idx]
-            return None
 
-        # Letter selection (a, b, c, etc.)
+        # Check for letter selection (a, b, c, etc.)
         if len(query_lower) == 1 and query_lower.isalpha():
             idx = ord(query_lower) - ord("a")
             if 0 <= idx < len(available_options):
                 return available_options[idx]
-            return None
 
-        # Direct keyword match with options
+        # Check for keyword match with options
         for option in available_options:
             option_lower = option.lower()
             if option_lower in query_lower or query_lower in option_lower:
                 return option
 
-            # Significant word overlap
+            # Check for significant word overlap
             option_words = set(option_lower.split())
             query_words = set(query_lower.split())
-            # Remove common words
-            common = {"the", "a", "an", "is", "for", "to", "of", "and", "or"}
-            option_words -= common
-            query_words -= common
-
             overlap = option_words.intersection(query_words)
             if len(overlap) >= min(2, len(option_words) // 2 + 1):
                 return option
 
-        # NO MATCH - return None
         return None
 
 
 class ResponseSanitizer:
-    """Sanitize responses."""
+    """Sanitize responses to remove file references."""
 
     FILE_PATTERNS = [
         r"\b[\w\-]+\.(pdf|docx?|txt|xlsx?|pptx?|csv|json|xml|html?|md)\b",
@@ -199,75 +186,106 @@ class ResponseSanitizer:
 
 
 class NotFoundResponseGenerator:
-    """Generate not-found responses."""
+    """Generates appropriate responses when information is not found."""
 
-    RESPONSES = [
-        "I don't have information about that in my knowledge base.",
-        "I couldn't find any relevant information about this topic.",
-        "Sorry, I don't have data about that.",
-    ]
+    RESPONSES = {
+        "general": [
+            "I don't have information about that in my knowledge base. Could you try asking about a different topic?",
+            "I couldn't find any relevant information about this topic. Is there something else I can help you with?",
+            "Sorry, I don't have data about that. Would you like to ask about something else?",
+        ],
+        "partial": [
+            "I found some related information, but nothing that directly answers your question. Would you like me to share what I found?",
+        ],
+        "suggest_rephrase": [
+            "I couldn't find a match for your query. Could you try rephrasing or being more specific?",
+        ],
+    }
 
     @classmethod
-    def generate(cls) -> str:
-        return random.choice(cls.RESPONSES)
+    def generate(
+        cls, query: str, search_analysis: dict, available_topics: List[str] = None
+    ) -> str:
+        quality = search_analysis.get("quality", SearchQuality.NOT_FOUND.value)
+        confidence = search_analysis.get("confidence", 0)
+
+        if quality == SearchQuality.LOW.value and confidence > 0.1:
+            response = random.choice(cls.RESPONSES["partial"])
+        elif confidence == 0:
+            response = random.choice(cls.RESPONSES["general"])
+        else:
+            response = random.choice(cls.RESPONSES["suggest_rephrase"])
+
+        if available_topics and len(available_topics) > 0:
+            topic_list = ", ".join(available_topics[:5])
+            response += f"\n\nI can help you with topics like: {topic_list}."
+
+        return response
 
 
-# ==================== Node Functions ====================
+# ==================== Helper Functions ====================
+
+
+def get_user_message(messages) -> str:
+    """Extract latest user message."""
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return msg.content
+    return ""
+
+
+# ==================== Node Functions - EXACT copy from standalone ====================
 
 
 def analyze_input(state: AgentState) -> dict:
     """Analyze user input - simplified to avoid premature clarification."""
     messages = state["messages"]
-    context = state.get("context", {})
-    session_id = context.get("session_id", "default")
 
     user_message = get_user_message(messages)
-    print(f"\n{'='*60}")
-    print(f"[analyze_input] Message: '{user_message}'")
-    print(f"[analyze_input] Session: {session_id}")
+
+    print(f"\n[analyze_input] Message: '{user_message}'")
+    print(
+        f"[analyze_input] awaiting_scenario_selection: {state.get('awaiting_scenario_selection', False)}"
+    )
+    print(
+        f"[analyze_input] current_scenario_options: {state.get('current_scenario_options', [])}"
+    )
 
     if not user_message:
         return {"interaction_mode": InteractionMode.QUERY.value}
 
-    memory = memory_manager.get_or_create(session_id)
-
     # Check if we're awaiting scenario selection
-    disambiguation = memory.get_disambiguation()
-    if disambiguation and disambiguation.is_active:
-        current_options = disambiguation.current_options
-        print(f"[analyze_input] Active disambiguation, options: {current_options}")
-
+    if state.get("awaiting_scenario_selection", False):
+        current_options = state.get("current_scenario_options", [])
         selected = QueryAnalyzer.is_scenario_selection(user_message, current_options)
 
         if selected:
-            print(f"[analyze_input] User selected: '{selected}'")
+            print(f"[analyze_input] User selected scenario: '{selected}'")
             return {
                 "interaction_mode": InteractionMode.DISAMBIGUATION.value,
                 "selected_scenario": selected,
                 "awaiting_scenario_selection": False,
-                "original_query": disambiguation.original_query,
-                "search_results": disambiguation.search_results,
             }
         else:
-            # User's response didn't match options - treat as NEW query
-            print(f"[analyze_input] No match - treating as NEW query")
-            memory.clear_disambiguation()
+            # User's response didn't match options - treat as new query
+            print(f"[analyze_input] No match for options, treating as new query")
             return {
                 "interaction_mode": InteractionMode.QUERY.value,
                 "awaiting_scenario_selection": False,
-                "selected_scenario": None,
-                "original_query": user_message,
+                "selected_scenario": user_message,  # Use their response as context
             }
 
-    # Normal flow checks
+    # Check for greetings
     if QueryAnalyzer.is_greeting(user_message):
         print(f"[analyze_input] Greeting detected")
         return {"interaction_mode": InteractionMode.GREETING.value}
 
+    # Check for closings
     if QueryAnalyzer.is_closing(user_message):
         print(f"[analyze_input] Closing detected")
         return {"interaction_mode": InteractionMode.CLOSING.value}
 
+    # Check for too short
     if QueryAnalyzer.is_too_short(user_message):
         print(f"[analyze_input] Query too short")
         return {
@@ -279,7 +297,7 @@ def analyze_input(state: AgentState) -> dict:
         }
 
     # Default: proceed to search
-    print(f"[analyze_input] Normal query - will search")
+    print(f"[analyze_input] Normal query - proceeding to agent")
     return {
         "interaction_mode": InteractionMode.QUERY.value,
         "original_query": user_message,
@@ -298,11 +316,6 @@ def handle_greeting(state: AgentState) -> dict:
 
 def handle_closing(state: AgentState) -> dict:
     """Handle closing messages."""
-    context = state.get("context", {})
-    session_id = context.get("session_id", "default")
-    memory = memory_manager.get_or_create(session_id)
-    memory.clear_disambiguation()
-
     closings = [
         "Goodbye! Feel free to come back if you have more questions.",
         "Happy to help! Take care!",
@@ -323,34 +336,17 @@ def ask_clarification(state: AgentState) -> dict:
 def agent(state: AgentState) -> dict:
     """Main agent - processes queries by searching first."""
     messages = state["messages"]
-    interaction_mode = state.get("interaction_mode", InteractionMode.QUERY.value)
-
-    print(f"\n[agent] Mode: {interaction_mode}")
 
     context_info = ""
 
     # Add context for scenario selection flow
-    if interaction_mode == InteractionMode.DISAMBIGUATION.value:
-        selected = state.get("selected_scenario")
-        original = state.get("original_query", "")
-        search_results = state.get("search_results", "")
-
-        print(
-            f"[agent] Disambiguation - selected: '{selected}', original: '{original}'"
-        )
-
-        if selected and original:
-            context_info = f"""
-
-The user previously asked: "{original}"
-They have now selected/clarified: "{selected}"
-
-Call `get_scenario_answer` tool with:
-- search_results_json: (the previous search results)
-- selected_scenario: "{selected}"
-- original_query: "{original}"
-
-Then provide a focused answer based on the filtered results."""
+    if (
+        state.get("selected_scenario")
+        and state.get("interaction_mode") == InteractionMode.DISAMBIGUATION.value
+    ):
+        context_info = f"\n\nUser selected scenario: {state['selected_scenario']}"
+        context_info += f"\nOriginal query: {state.get('original_query', '')}"
+        context_info += "\nCall `get_scenario_answer` with this information."
 
     system = SystemMessage(content=SYSTEM_PROMPT + context_info)
     response = llm_with_tools.invoke([system] + list(messages))
@@ -361,10 +357,8 @@ Then provide a focused answer based on the filtered results."""
 def validate_and_route(state: AgentState) -> dict:
     """Validate search results and determine routing."""
     messages = state["messages"]
-    context = state.get("context", {})
-    session_id = context.get("session_id", "default")
 
-    print(f"\n[validate_and_route] Checking results...")
+    print(f"\n[validate_and_route] Checking tool results...")
 
     # Find the last tool message
     last_tool_result = None
@@ -373,8 +367,8 @@ def validate_and_route(state: AgentState) -> dict:
             try:
                 last_tool_result = json.loads(msg.content)
                 print(
-                    f"[validate_and_route] Tool result: found={last_tool_result.get('found_answer')}, "
-                    f"disambiguation={last_tool_result.get('disambiguation_needed')}"
+                    f"[validate_and_route] found_answer={last_tool_result.get('found_answer')}, "
+                    f"disambiguation_needed={last_tool_result.get('disambiguation_needed')}"
                 )
                 break
             except:
@@ -387,13 +381,12 @@ def validate_and_route(state: AgentState) -> dict:
     found_answer = last_tool_result.get("found_answer", False)
     disambiguation_needed = last_tool_result.get("disambiguation_needed", False)
 
-    memory = memory_manager.get_or_create(session_id)
-
     if not found_answer:
         # No relevant information found
-        message = last_tool_result.get("message", NotFoundResponseGenerator.generate())
+        message = last_tool_result.get(
+            "message", "I don't have information about that."
+        )
         print(f"[validate_and_route] Not found: {message}")
-        memory.clear_disambiguation()
         return {
             "should_respond_not_found": True,
             "not_found_message": message,
@@ -401,12 +394,12 @@ def validate_and_route(state: AgentState) -> dict:
         }
 
     if disambiguation_needed:
-        # Multiple scenarios found
+        # Multiple scenarios found in content
         scenarios = last_tool_result.get("scenarios", [])
         options = [s.get("title", f"Option {i+1}") for i, s in enumerate(scenarios)]
         question = last_tool_result.get("disambiguation_question", "")
 
-        print(f"[validate_and_route] Disambiguation needed: {len(scenarios)} scenarios")
+        print(f"[validate_and_route] Disambiguation needed! Scenarios: {options}")
 
         if not question and scenarios:
             question = "I found information about multiple scenarios:\n\n"
@@ -415,14 +408,6 @@ def validate_and_route(state: AgentState) -> dict:
                 if s.get("description"):
                     question += f"   {s.get('description')}\n"
             question += "\nWhich one applies to your situation?"
-
-        # Store disambiguation state in Redis
-        memory.set_disambiguation(
-            original_query=state.get("original_query", get_user_message(messages)),
-            options=options,
-            search_results=json.dumps(last_tool_result),
-            question=question,
-        )
 
         return {
             "has_multiple_scenarios": True,
@@ -434,10 +419,8 @@ def validate_and_route(state: AgentState) -> dict:
             "search_results": json.dumps(last_tool_result),
         }
 
-    # Single scenario or clear answer - clear any stale state
-    memory.clear_disambiguation()
+    # Single scenario or clear answer - proceed normally
     print(f"[validate_and_route] Single answer - proceeding")
-
     return {
         "should_respond_not_found": False,
         "found_relevant_info": True,
@@ -447,12 +430,11 @@ def validate_and_route(state: AgentState) -> dict:
 
 def handle_not_found(state: AgentState) -> dict:
     """Handle case when no relevant information was found."""
-    context = state.get("context", {})
-    session_id = context.get("session_id", "default")
-    memory = memory_manager.get_or_create(session_id)
-    memory.clear_disambiguation()
-
-    message = state.get("not_found_message", NotFoundResponseGenerator.generate())
+    message = state.get(
+        "not_found_message",
+        "I don't have information about that in my knowledge base. "
+        "Is there something else I can help you with?",
+    )
     print(f"[handle_not_found] {message}")
     return {"messages": [AIMessage(content=message)]}
 
@@ -489,6 +471,7 @@ def route_after_analysis(
 ) -> Literal["handle_greeting", "handle_closing", "ask_clarification", "agent"]:
     """Route based on analysis results."""
     mode = state.get("interaction_mode", InteractionMode.QUERY.value)
+
     print(f"[route_after_analysis] Mode: {mode}")
 
     if mode == InteractionMode.GREETING.value:
@@ -505,17 +488,13 @@ def route_after_validation(
     state: AgentState,
 ) -> Literal["handle_not_found", "agent", "present_scenarios"]:
     """Route based on search result validation."""
-    should_not_found = state.get("should_respond_not_found", False)
-    has_multiple = state.get("has_multiple_scenarios", False)
-    awaiting = state.get("awaiting_scenario_selection", False)
-
-    print(
-        f"[route_after_validation] not_found={should_not_found}, "
-        f"multiple={has_multiple}, awaiting={awaiting}"
-    )
-
-    if should_not_found:
+    if state.get("should_respond_not_found", False):
+        print(f"[route_after_validation] -> handle_not_found")
         return "handle_not_found"
-    if has_multiple and awaiting:
+    if state.get("has_multiple_scenarios", False) and state.get(
+        "awaiting_scenario_selection", False
+    ):
+        print(f"[route_after_validation] -> present_scenarios")
         return "present_scenarios"
+    print(f"[route_after_validation] -> agent")
     return "agent"

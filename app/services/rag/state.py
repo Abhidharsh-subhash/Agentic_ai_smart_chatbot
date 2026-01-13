@@ -5,7 +5,7 @@ from langchain_core.messages import BaseMessage
 
 
 class AgentState(TypedDict):
-    """State definition - matching standalone exactly."""
+    """State definition - EXACT copy from standalone."""
 
     messages: Annotated[Sequence[BaseMessage], operator.add]
     context: dict

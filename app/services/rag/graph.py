@@ -1,6 +1,6 @@
 # app/services/rag/graph.py
 """
-Graph definition - matching standalone exactly.
+Graph definition - EXACT copy from standalone agentic_ai_logic.py
 """
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
@@ -23,7 +23,7 @@ from .nodes import (
 
 
 def create_agent():
-    """Create and compile the agent graph."""
+    """Create and compile the agent graph - matches standalone exactly."""
     workflow = StateGraph(AgentState)
 
     # Add nodes
@@ -80,5 +80,6 @@ def create_agent():
         },
     )
 
+    # CRITICAL: MemorySaver maintains conversation across invocations
     memory = MemorySaver()
     return workflow.compile(checkpointer=memory)
