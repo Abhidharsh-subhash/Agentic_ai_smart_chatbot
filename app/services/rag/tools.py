@@ -21,7 +21,7 @@ def get_llm() -> ChatOpenAI:
     global _llm
     if _llm is None:
         _llm = ChatOpenAI(
-            model=getattr(settings, "openai_model", "gpt-4o"),
+            model=settings.openai_model,
             temperature=0,
             openai_api_key=settings.openai_api_key,
         )

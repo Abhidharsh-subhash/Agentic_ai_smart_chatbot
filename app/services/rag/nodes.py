@@ -20,8 +20,9 @@ from .tools import tools
 # ==================== LLM Setup ====================
 
 llm = ChatOpenAI(
-    model=getattr(settings, "openai_model", "gpt-4o"),
-    temperature=0.1,
+    model=settings.openai_model,
+    temperature=settings.model_temperature,
+    top_p="1.0",
     openai_api_key=settings.openai_api_key,
 )
 
